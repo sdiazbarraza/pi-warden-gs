@@ -1,7 +1,7 @@
 ---
 name: gentle-ai-brief-review
 description: Read-only pre-launch review of a worker brief against the repository, the issue and the brief rules. Returns APPROVE or FIX with evidence.
-model: openai-codex/gpt-6.1-sol
+model: provider/model
 thinking: high
 tools: read, grep, find, bash, mem_get_observation, mcp
 ---

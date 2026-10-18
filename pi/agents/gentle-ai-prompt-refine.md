@@ -1,7 +1,7 @@
 ---
 name: gentle-ai-prompt-refine
 description: Read-only refinement of a human work request into a complete, evidence-backed instruction for the orchestrator. Never expands scope or invents authorization.
-model: openai-codex/gpt-6.1-sol
+model: provider/model
 thinking: high
 tools: read, grep, find, bash, mem_search, mem_get_observation, mcp
 ---
