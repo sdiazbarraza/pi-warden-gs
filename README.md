@@ -229,8 +229,12 @@ replaced, and the script can run repeatedly.
   only; its writers and refuter use `minimax/MiniMax-M3.1-Flash-Preview`, which Pi's catalog lacks,
   so `install.sh` adds it to the `minimax` provider in `models.json` with `pi/models-minimax.jq`
   (only when missing; other providers, keys and entries are kept).
-- `bin/pi-perfil`: activates a saved profile (`pi-perfil <name>`, `pi-perfil list`). It validates
-  `~/.pi/gentle-ai/profiles/<name>.json`, adds or replaces it in `~/.pi/gentle-ai/profiles.json`
+- `bin/pi-perfil`: activates any routing profile saved in `~/.pi/gentle-ai/profiles/` (`pi-perfil
+  <name>`, `pi-perfil list`), reading the connected providers from Pi's `auth.json` and warning, without
+  blocking, about a profile whose provider Pi has no credentials for. `pi-perfil suggest --model
+  provider/model [profile]` writes `<profile>-suggested.json` with the models of unconnected providers
+  replaced by the one you pass, and writes nothing when everything is already reachable. Activation
+  validates `~/.pi/gentle-ai/profiles/<name>.json`, adds or replaces it in `~/.pi/gentle-ai/profiles.json`
   (backing that file up first) and marks it active, which gentle-pi uses to route subagents.
   gentle-pi freezes the profile when a session starts: new sessions pick it up, open sessions need
   `/gentle:profiles` → `<name>` → Enter, and `/reload` does not switch it. The profile is also

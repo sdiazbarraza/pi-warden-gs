@@ -21,6 +21,22 @@ const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"))
 const run = (dir: string, ...args: string[]) =>
   spawnSync("bash", [SCRIPT, ...args], { encoding: "utf8", env: { ...process.env, HOME: dir, GENTLE_SHELL_BIN: "/nonexistent" } })
 
+// Two agents, one on a provider that is connected and one that is not.
+const MULTI =
+  JSON.stringify({
+    kind: "gentle-pi.agent_model_routing",
+    version: 1,
+    agents: {
+      "gentle-ai-worker": { model: "minimax/MiniMax-M3", thinking: "high" },
+      "gentle-ai-verify": { model: "openai-codex/gpt-6.1-sol", thinking: "high" },
+    },
+  }) + "\n"
+const saveAuth = (dir: string, providers: string[]) => {
+  mkdirSync(join(dir, ".pi", "agent"), { recursive: true })
+  const auth = Object.fromEntries(providers.map((p) => [p, { type: "api_key", key: "test" }]))
+  writeFileSync(join(dir, ".pi", "agent", "auth.json"), JSON.stringify(auth) + "\n")
+}
+
 test("activates a profile in a new profiles.json and still writes models.export.json", () => {
   const dir = home()
   saveProfile(dir, "plan-minimax-m3")
@@ -98,4 +114,72 @@ test("with an isolated gentle-shell home, profiles are read from and activated i
   assert.equal(out.status, 0, out.stderr)
   assert.equal(readJson(join(config, "profiles.json")).active, "gpt")
   assert.equal(existsSync(join(dir, ".pi", "gentle-ai")), false)
+})
+
+test("activates any profile present in the profiles dir, with no hardcoded list", () => {
+  const dir = home()
+  saveProfile(dir, "mi-perfil")
+  const out = run(dir, "mi-perfil")
+  assert.equal(out.status, 0, out.stderr)
+  assert.equal(readJson(gentle(dir, "profiles.json")).active, "mi-perfil")
+})
+
+test("warns about a provider the profile needs but Pi has not connected, and still activates", () => {
+  const dir = home()
+  saveProfile(dir, "gpt", MULTI)
+  saveAuth(dir, ["minimax"])
+  const out = run(dir, "gpt")
+  assert.equal(out.status, 0, out.stderr)
+  assert.match(out.stdout, /proveedores no conectados/)
+  assert.match(out.stdout, /openai-codex/)
+  assert.match(out.stdout, /Conectados: minimax/)
+  assert.equal(readJson(gentle(dir, "profiles.json")).active, "gpt")
+})
+
+test("stays quiet when every provider of the profile is connected", () => {
+  const dir = home()
+  saveProfile(dir, "gpt", MULTI)
+  saveAuth(dir, ["minimax", "openai-codex"])
+  const out = run(dir, "gpt")
+  assert.equal(out.status, 0, out.stderr)
+  assert.doesNotMatch(out.stdout, /no conectados/)
+})
+
+test("suggest replaces only the models of providers that are not connected", () => {
+  const dir = home()
+  saveProfile(dir, "gpt", MULTI)
+  saveAuth(dir, ["minimax"])
+  const out = run(dir, "suggest", "--model", "minimax/MiniMax-M3.1-Flash-Preview", "gpt")
+  assert.equal(out.status, 0, out.stderr)
+  const suggested = readJson(gentle(dir, "profiles", "gpt-suggested.json"))
+  assert.equal(suggested.kind, "gentle-pi.agent_model_routing")
+  assert.equal(suggested.agents["gentle-ai-worker"].model, "minimax/MiniMax-M3")
+  assert.equal(suggested.agents["gentle-ai-verify"].model, "minimax/MiniMax-M3.1-Flash-Preview")
+  assert.equal(suggested.agents["gentle-ai-verify"].thinking, "high")
+  assert.match(out.stdout, /openai-codex/)
+})
+
+test("suggest writes nothing when every provider is already connected", () => {
+  const dir = home()
+  saveProfile(dir, "minimax", ROUTING)
+  saveAuth(dir, ["minimax"])
+  const out = run(dir, "suggest", "--model", "minimax/MiniMax-M3", "minimax")
+  assert.equal(out.status, 0, out.stderr)
+  assert.equal(existsSync(gentle(dir, "profiles", "minimax-suggested.json")), false)
+  assert.match(out.stdout, /nada que sugerir/)
+})
+
+test("suggest needs --model, and names the profile it works on", () => {
+  const dir = home()
+  saveProfile(dir, "gpt", MULTI)
+  const out = run(dir, "suggest", "gpt")
+  assert.equal(out.status, 1)
+  assert.match(out.stdout + out.stderr, /--model/)
+})
+
+test("rejects a profile name that would leave the profiles dir", () => {
+  const dir = home()
+  const out = run(dir, "../evil")
+  assert.equal(out.status, 1)
+  assert.equal(existsSync(gentle(dir, "profiles.json")), false)
 })

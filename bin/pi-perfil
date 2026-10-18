@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+# pi-perfil activates a gentle-pi agent model routing profile, lists the saved ones, and suggests a
+# profile that only uses providers Pi has credentials for.
 set -euo pipefail
 
 SHELL_BIN="${GENTLE_SHELL_BIN:-gentle-shell}"
-SHELL_MODE=""
+SHELL_MODE=""; SHELL_HOME=""
 if command -v "$SHELL_BIN" >/dev/null 2>&1; then
-  read -r SHELL_MODE _ < <("$SHELL_BIN" home 2>/dev/null) || true
+  read -r SHELL_MODE SHELL_HOME < <("$SHELL_BIN" home 2>/dev/null) || true
 fi
 
 if [[ -n "${GENTLE_PI_CONFIG_HOME:-}" ]]; then
@@ -15,35 +17,166 @@ else
   GENTLE_DIR="${HOME}/.pi/gentle-ai"
 fi
 
+# Pi's agent home, the one whose auth.json lists the providers Pi has credentials for.
+AGENT_DIR="${PI_CODING_AGENT_DIR:-${SHELL_HOME:-$HOME/.pi/agent}}"
+AUTH_FILE="$AGENT_DIR/auth.json"
+
 PROFILES_DIR="${GENTLE_DIR}/profiles"
 PROFILES_FILE="${GENTLE_DIR}/profiles.json"
 EXPORT_FILE="${GENTLE_DIR}/models.export.json"
 
+usage_lines() {
+  echo "Uso: pi-perfil <perfil|list|suggest>"
+  echo "  <perfil>                      Activa ${PROFILES_DIR}/<perfil>.json"
+  echo "  list                          Lista perfiles guardados y proveedores conectados"
+  echo "  suggest --model p/m [perfil]  Escribe <perfil>-suggested.json cambiando los modelos de"
+  echo "                                proveedores no conectados por el que indiques"
+}
+
 usage() {
-  echo "Uso: pi-perfil <opencode-go|minimax-m3|list>"
-  echo "  list                     Lista perfiles guardados"
+  usage_lines
   exit 1
+}
+
+join_lines() { tr '\n' ' ' | sed 's/ *$//'; }
+
+# Providers with credentials in Pi, one per line.
+connected_providers() {
+  [[ -f "$AUTH_FILE" ]] || return 0
+  jq -r 'keys[]' "$AUTH_FILE" 2>/dev/null || true
+}
+
+# Providers a routing profile needs, one per line, in the order they appear.
+profile_providers() {
+  jq -r '[.agents[]?.model // empty | split("/")[0]] | unique[]' "$1" 2>/dev/null || true
+}
+
+# Providers the profile needs that Pi has not connected, one per line.
+missing_providers() {
+  local p connected
+  connected="$(connected_providers)"
+  profile_providers "$1" | while read -r p; do
+    [[ -z "$p" ]] && continue
+    grep -qxF "$p" <<<"$connected" || echo "$p"
+  done
+}
+
+# Warns and continues: a profile with an unreachable provider still activates, it just will not route.
+warn_unconnected() {
+  local profile="$1" name="$2" missing connected
+  missing="$(missing_providers "$profile")"
+  [[ -z "$missing" ]] && return 0
+  if [[ ! -f "$AUTH_FILE" ]]; then
+    echo "Aviso: no encuentro $AUTH_FILE, así que no puedo verificar los proveedores conectados."
+    return 0
+  fi
+  connected="$(connected_providers | join_lines)"
+  echo "Aviso: el perfil usa proveedores no conectados: $(echo "$missing" | join_lines)"
+  echo "  Conectados: ${connected:-ninguno}"
+  echo "  Conectá el proveedor con 'pi auth', o generá un perfil con el modelo que ya usás:"
+  echo "  pi-perfil suggest --model <proveedor>/<modelo> $name"
 }
 
 [[ $# -lt 1 ]] && usage
 
 case "$1" in
   list)
-    ls -1 "$PROFILES_DIR"/*.json 2>/dev/null || echo "No hay perfiles en $PROFILES_DIR"
+    ACTIVE="$(jq -r '.active // empty' "$PROFILES_FILE" 2>/dev/null || true)"
+    FOUND=0
+    for f in "$PROFILES_DIR"/*.json; do
+      [[ -f "$f" ]] || continue
+      FOUND=1
+      if [[ "$(basename "$f" .json)" == "$ACTIVE" ]]; then echo "* $f (activo)"; else echo "  $f"; fi
+    done
+    [[ "$FOUND" == 1 ]] || echo "No hay perfiles en $PROFILES_DIR"
+    CONNECTED="$(connected_providers | join_lines)"
+    echo "Proveedores conectados: ${CONNECTED:-ninguno}"
     ;;
-  opencode-go-minimax-m3|plan-minimax-m3|minimax-m3-clean|minimax-openai|deepseek|frontier-model|gpt|deepseek-minimax|opencode-go|go-minimax)
-    command -v jq >/dev/null 2>&1 || { echo "Error: se necesita jq" >&2; exit 1; }
-    SRC="$PROFILES_DIR/$1.json"
 
+  suggest)
+    shift
+    MODEL_ARG=""; BASE=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --model) MODEL_ARG="${2:-}"; shift 2 ;;
+        --model=*) MODEL_ARG="${1#--model=}"; shift ;;
+        *) BASE="$1"; shift ;;
+      esac
+    done
+    command -v jq >/dev/null 2>&1 || { echo "Error: se necesita jq" >&2; exit 1; }
+    if [[ -z "$MODEL_ARG" ]]; then
+      echo "Error: suggest necesita --model <proveedor>/<modelo>" >&2
+      usage
+    fi
+    if ! [[ "$MODEL_ARG" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$ ]]; then
+      echo "Error: --model debe ser proveedor/modelo (recibido: $MODEL_ARG)" >&2
+      exit 1
+    fi
+    if [[ -z "$BASE" ]]; then
+      BASE="$(jq -r '.active // empty' "$PROFILES_FILE" 2>/dev/null || true)"
+    fi
+    if [[ -z "$BASE" ]]; then
+      echo "Error: indicá el perfil o activá uno primero" >&2
+      usage
+    fi
+    SRC="$PROFILES_DIR/$BASE.json"
     if [[ ! -f "$SRC" ]]; then
       echo "No existe: $SRC"
       exit 1
     fi
+    CONNECTED_JSON="$(connected_providers | jq -R . | jq -s .)"
+    TMP="$(mktemp "$PROFILES_DIR/.suggested.XXXXXX")"
+    trap 'rm -f "$TMP"' EXIT
+    jq --arg m "$MODEL_ARG" --argjson conn "$CONNECTED_JSON" '
+      .agents |= with_entries(
+        if ((.value.model // "") | split("/")[0]) as $p | ($conn | index($p)) != null
+        then .
+        else .value.model = $m
+        end)
+    ' "$SRC" > "$TMP"
+    CHANGED="$(jq -r --slurpfile src "$SRC" '
+      .agents | to_entries[]
+      | select(.value.model != ($src[0].agents[.key].model // ""))
+      | "  \(.key): \($src[0].agents[.key].model // "sin modelo") -> \(.value.model)"
+    ' "$TMP")"
+    if [[ -z "$CHANGED" ]]; then
+      echo "Sin cambios: nada que sugerir, todos los proveedores de $BASE.json están conectados."
+      exit 0
+    fi
+    OUT="$PROFILES_DIR/${BASE}-suggested.json"
+    mv "$TMP" "$OUT"
+    trap - EXIT
+    echo "Sugerido: $OUT"
+    echo "$CHANGED"
+    echo "Activalo con: pi-perfil ${BASE}-suggested"
+    ;;
+
+  *)
+    if [[ "$1" == *"/"* || "$1" == .* ]]; then
+      echo "Error: nombre de perfil inválido: $1" >&2
+      usage
+    fi
+    SRC="$PROFILES_DIR/$1.json"
+
+    if [[ ! -f "$SRC" ]]; then
+      usage_lines
+      echo "No existe: $SRC"
+      AVAILABLE=""
+      for f in "$PROFILES_DIR"/*.json; do
+        [[ -f "$f" ]] && AVAILABLE+="$(basename "$f" .json) "
+      done
+      [[ -n "$AVAILABLE" ]] && echo "Perfiles guardados: $AVAILABLE"
+      exit 1
+    fi
+
+    command -v jq >/dev/null 2>&1 || { echo "Error: se necesita jq" >&2; exit 1; }
 
     if ! jq -e '.kind == "gentle-pi.agent_model_routing" and (.agents | type == "object")' "$SRC" >/dev/null 2>&1; then
       echo "Error: $SRC no es un perfil válido" >&2
       exit 1
     fi
+
+    warn_unconnected "$SRC" "$1"
 
     if [[ -f "$PROFILES_FILE" ]]; then
       cp -p "$PROFILES_FILE" "$PROFILES_FILE.bak-$(date +%Y%m%d-%H%M%S)"
@@ -62,13 +195,10 @@ case "$1" in
 
     mv "$TMP" "$PROFILES_FILE"
     trap - EXIT
-    
+
     cp "$SRC" "$EXPORT_FILE"
 
     echo "Perfil '$1' activo en $PROFILES_FILE y copiado a models.export.json"
-echo "Sesiones abiertas: /gentle:profiles -> $1 -> Enter. Las sesiones nuevas ya lo toman."
-    ;;
-  *)
-    usage
+    echo "Sesiones abiertas: /gentle:profiles -> $1 -> Enter. Las sesiones nuevas ya lo toman."
     ;;
 esac
