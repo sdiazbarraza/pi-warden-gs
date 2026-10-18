@@ -1,0 +1,62 @@
+{
+  "kind": "gentle-pi.agent_model_routing",
+  "version": 1,
+  "agents": {
+    "gentle-ai-worker": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "gentle-ai-worker-infra": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "gentle-ai-verify": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "gentle-ai-brief-review": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "medium"
+    },
+    "gentle-ai-prompt-refine": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "medium"
+    },
+    "gentle-ai-explore": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "gentle-ai-runner": {
+      "model": "deepseek/deepseek-flash",
+      "thinking": "low"
+    },
+    "gentle-ai-publisher": {
+      "model": "deepseek/deepseek-flash",
+      "thinking": "low"
+    },
+    "review-risk": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "review-resilience": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "medium"
+    },
+    "review-reliability": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "medium"
+    },
+    "review-readability": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "medium"
+    },
+    "review-refuter": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "review-validator": {
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "high"
+    }
+  }
+}

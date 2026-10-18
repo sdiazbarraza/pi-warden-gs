@@ -1,0 +1,261 @@
+# pi-warden-gs
+
+A [Pi](https://github.com/gentleman-programming/pi) package with the author's harness guards, gates
+and workarounds for Gentle AI workflows: it blocks destructive commands, requires a reviewed brief
+before any writer subagent starts, keeps the orchestrator's replies short, and repairs a
+`gentle_review` START whose arguments arrived mangled.
+
+Opinionated by design: this is one author's working configuration, published as-is so it can be
+read, copied and adapted. Read the code before installing it — packages can execute code in your
+session.
+
+- Author: Sebastián Díaz ([@sdiazbarraza](https://github.com/sdiazbarraza))
+- License: [MIT](LICENSE)
+
+## Requirements
+
+- Pi (`pi` CLI). Most extensions assume [gentle-pi](https://www.npmjs.com/package/gentle-pi) and its
+  `gentle-ai-*` subagents; `safety-guard.ts` and `brief-guard.sh` are the only pieces that depend on
+  them.
+- `bash`, `jq` and `git` for `hooks/brief-guard.sh` and `install.sh`.
+- Node >= 22 only to run the tests.
+- `install.sh` and `bin/pi-perfil` read the target home from `gentle-shell home`: `link` uses
+  `~/.pi/agent` and `~/.pi/gentle-ai`, `isolated` uses `~/.gentle-shell/agent` and
+  `~/.gentle-shell/gentle-ai`; `PI_CODING_AGENT_DIR` and `GENTLE_PI_CONFIG_HOME` override both.
+
+## Install
+
+### Option 1 — install the package (extensions only)
+
+```bash
+pi install git:github.com/sdiazbarraza/pi-warden-gs
+pi list                        # must show ../../... or the git source you just added
+```
+
+Personal installs are written to `~/.pi/agent/settings.json`; add `-l` to write
+`.pi/settings.json` for one project instead. To try it for a single run without touching settings:
+
+```bash
+pi -e git:github.com/sdiazbarraza/pi-warden-gs
+```
+
+This option loads the `extensions/` listed in `package.json` and nothing else. Use it if you only
+want the guards and workarounds.
+
+### Option 2 — clone and run the installer (full setup)
+
+```bash
+git clone https://github.com/sdiazbarraza/pi-warden-gs
+cd pi-warden-gs
+./install.sh
+```
+
+`install.sh` is idempotent and deploys the parts Pi does not load from a package:
+
+1. Copies `pi/APPEND_SYSTEM.md` and the `pi/agents/*.md` definitions into `<agent-dir>`.
+2. Copies `bin/pi-perfil` to `~/bin/pi-perfil` and the routing profiles to
+   `~/.pi/gentle-ai/profiles/`.
+3. Installs `hooks/brief-guard.sh` as the Claude Code `PreToolUse` hook in
+   `~/.claude/hooks/` and registers it in `~/.claude/settings.json`.
+4. Moves previously loose `safety-guard.ts`, `rtk.ts` and `minimax-review-binding.ts` out of
+   `<agent-dir>/extensions` into `extensions-backup-<stamp>/`, so a stale copy cannot load twice.
+5. Disables the `builtin:mcp` and `builtin:codemode` extensions in `<agent-dir>/settings.json`.
+6. Registers this directory as a Pi package (`gentle-shell install <dir>`, or `pi install <dir>`
+   without gentle-shell).
+7. Backs up every file it would overwrite to `*.bak-<stamp>` and keeps the originals otherwise.
+
+Keep the cloned directory in place: Pi loads the extensions from it, and `/reload` (or a new
+session) activates changes in an open session.
+
+If the target machine lacks `openai-codex` or `minimax` models, give every bundled agent one model
+that is signed in there:
+
+```bash
+PI_WARDEN_GS_MODEL=deepseek/deepseek-v4-pro ~/pi-warden-gs/install.sh
+```
+
+The value must be `provider/model`. Without the variable the bundled models are kept; the
+installer never changes Pi's default (orchestrator) model. `PI_OVERRIDES_MODEL` is still accepted as
+a legacy alias.
+
+### Option 3 — hooks and agents only
+
+Copy `pi/APPEND_SYSTEM.md` and `pi/agents/*.md` into your agent directory by hand and register
+`hooks/brief-guard.sh` in your Claude Code settings. Nothing else is required: the `extensions/`
+files are plain Pi extensions if you prefer to load them with `-e`.
+
+### Verify the installation
+
+```bash
+pi list                                  # the package appears
+node --experimental-strip-types --test tests/*.test.ts    # 64 tests, all passing
+chmod 755 hooks/brief-guard.sh           # only if you copied it by hand
+```
+
+In an open Pi session, run `/reload` after installing or updating the package.
+
+## How the package works
+
+### Pi packages and what actually loads
+
+A Pi package is an ordinary directory or npm source declared in `settings.json`. Pi shows the ones
+it configured with `pi list`, installs or removes them with `pi install` / `pi remove`, and can load
+one package for a single invocation with `pi -e`.
+
+`package.json` carries the manifest:
+
+```json
+"keywords": ["pi-package"],
+"pi": { "extensions": ["./extensions/safety-guard.ts", "..."] }
+```
+
+That list, not the contents of `extensions/`, decides what loads. A file present in `extensions/`
+but absent from `pi.extensions` loads nothing — which is why every extension is registered here and
+why `install.sh` removes loose copies from `<agent-dir>/extensions/`: the same file in two places
+would register its handler twice.
+
+Without a `pi` manifest, Pi falls back to discovering `extensions/`, `skills/`, `prompts/` and
+`themes/` by convention. This package uses the explicit list.
+
+### Extension lifecycle
+
+Each file in `extensions/` is a self-contained Pi extension. Pi calls its default export once per
+session with the `ExtensionAPI`; the extension registers handlers and returns:
+
+```ts
+export default function (pi: ExtensionAPI) {
+  pi.on("tool_call", async (event) => { /* runs before every tool */ })
+}
+```
+
+| Extension | Hooks | What it does | Failure mode |
+| --- | --- | --- | --- |
+| `safety-guard.ts` | `tool_call` | Blocks destructive bash commands, blocks direct delivery commands outside `gentle-ai-publisher`, blocks heavy builds in the orchestrator, and gates writer dispatch on a reviewed brief | Fail-**closed** on writer dispatch (any guard error blocks), fail-open on the bash destructive check |
+| `brief-guard.sh` (hook) | Claude Code `PreToolUse`, and spawned by `safety-guard` | Checks the eight required brief sections, their order and the literal stop-and-report clause | Fail-open on parsing, exit 2 on a malformed brief |
+| `reply-length.ts` | `before_agent_start` | Adds one hidden reminder per user-started run of the main session: at most 5 lines of at most 25 words, outcome first, long content in a file | Cannot fail: it only appends a message |
+| `gentle-review-start-repair.ts` | `tool_call` | Repairs a `gentle_review` START whose `lenses`, `lensesReason` or `committedOnly` arrived mangled, so the call is not rejected as `lenses-invalid` | Fail-open: any internal error passes the call through unchanged |
+| `rtk.ts` | `tool_call` | Rewrites bash commands to use `rtk` for token savings | Leaves commands alone when it cannot rewrite them |
+
+A `tool_call` handler runs before the tool and may mutate `event.input`; Pi performs no validation
+afterwards. A handler that throws blocks the tool, so every mutating path here is wrapped: mutations
+are deliberate and exceptions are swallowed into a pass-through.
+
+### The brief gate, end to end
+
+Writer subagents (`gentle-ai-worker`, `gentle-ai-worker-infra`) only start with an approved brief:
+
+1. The orchestrator runs `gentle-ai-brief-review` with `mode: "task"` and the exact brief inline,
+   between a line `<<<BRIEF` and a line `BRIEF>>>`.
+2. `safety-guard.ts` requires the reviewer to run in a foreground `task`, and rejects a brief that
+   already contains a `VERDICT:` line.
+3. On `VERDICT: APPROVE` the sha256 of the normalized brief (CRLF → LF, trimmed) becomes a session
+   entry, an approval.
+4. Launching a writer consumes that approval for byte-identical text (task plus context). Approvals
+   are single-use: any edit needs a new review.
+5. Before the approval is consumed, `hooks/brief-guard.sh` checks the structure. Pi forces that
+   check with `BRIEF_GUARD_FORCE_STRUCTURE=1`, so it applies to every writer brief regardless of
+   `AGENTS.md` or of whether the working directory is a git repository. In Claude Code the same
+   script runs as a hook, and there it activates only in repositories whose `AGENTS.md` defines
+   `### Brief del subagente`.
+6. A brief whose first line is `<!-- review: skipped (small fix) -->` skips both the review and the
+   structural contract, by design.
+7. `subagent_continue` and `subagent_send_message` to a writer task are always blocked: new
+   instructions need a new reviewed brief.
+
+Approvals and writer task ids are session entries, so they survive reload, resume and branch
+changes. In exchange, an entry keyed by the old package name (`pi-overrides.brief-approval`) does
+not match after the rename to `pi-warden-gs`: the guard fails closed and that brief has to be
+reviewed again.
+
+### What `install.sh` puts where
+
+| From | To | Notes |
+| --- | --- | --- |
+| `pi/APPEND_SYSTEM.md` | `<agent-dir>/APPEND_SYSTEM.md` | Persistent global override appended to Pi's system prompt |
+| `pi/agents/*.md` | `<agent-dir>/agents/` | `gentle-ai-runner`, `-worker-infra`, `-publisher`, `-brief-review`, `-prompt-refine` |
+| `pi/profiles/*.json` | `~/.pi/gentle-ai/profiles/` | Model routing per agent |
+| `pi/models-minimax.jq` | — | Used only to add a missing model to `models.json` |
+| `bin/pi-perfil` | `~/bin/pi-perfil` | Profile switcher, needs `jq` |
+| `hooks/brief-guard.sh` | `~/.claude/hooks/brief-guard.sh` | Shared with Claude Code |
+| `extensions/*.ts` | *(nobody)* | Loaded in place from this package |
+
+Anything already installed with different content is backed up as `*.bak-<stamp>` before it is
+replaced, and the script can run repeatedly.
+
+## Contents
+
+### Extensions
+
+- `extensions/safety-guard.ts`: destructive-command blocker, brief approval gate and delivery gate.
+  `git push` and `gh pr create|merge|edit` run only inside `gentle-ai-publisher` — a gentle-pi child
+  whose definition carries `<!-- pi-warden-gs:agent=gentle-ai-publisher -->` — while the orchestrator
+  and other agents are blocked. Builds, test runs and container runs (`dotnet-in-docker.sh`,
+  `docker run|build|exec`, `docker compose up|run|build|exec`) are blocked in the orchestrator and
+  allowed in subagents, and read-only docker queries stay allowed. Checks cover `bash`,
+  `bash_background` and `monitor`.
+- `extensions/reply-length.ts`: adds one hidden reminder before every user-started run of the main
+  session (never in subagents) to answer in at most 5 lines of at most 25 words each, one sentence
+  per line, outcome first and long content in a file. The reminder is the single home of that
+  policy; no `AGENTS.md` or `APPEND_SYSTEM.md` restates it.
+- `extensions/gentle-review-start-repair.ts`: workaround for
+  [gentle-shell#2280](https://github.com/Gentleman-Programming/gentle-shell/issues/2280). It repairs
+  a `gentle_review` START whose `lenses` arrived as a comma string, a JSON string, with duplicates
+  or non-canonical names; whose `lensesReason` carries a newline or more than 500 bytes; or whose
+  `committedOnly` arrived as `"true"`/`1` (and deletes it for the `"false"`/`0` shapes the contract
+  rejects). Its README documents the exact scope and the deliberate limitation. Delete the file once
+  the upstream fix lands.
+- `extensions/rtk.ts`: rtk integration for bash command rewriting.
+
+### Hooks, agents and configuration
+
+- `hooks/brief-guard.sh`: the structural brief check shared with Claude Code, described above.
+- `pi/APPEND_SYSTEM.md`: the global override — subagent roles, verification rules, prompt refinement,
+  brief review, memory, and the reply-length policy.
+- `pi/agents/*.md`: the subagent definitions used by these rules (`gentle-ai-runner`,
+  `gentle-ai-worker-infra`, `gentle-ai-publisher`, `gentle-ai-brief-review`,
+  `gentle-ai-prompt-refine`).
+- `pi/profiles/*.json`: model-routing profiles for the gentle-ai and review agents.
+  `deepseek`: DeepSeek only (v4-pro for writers, verify and reviewers; flash for runner and
+  publisher). `deepseek-minimax`: writers on DeepSeek, reviewers on MiniMax M3. `gpt`: GPT only
+  (`openai-codex`). `opencode-go`: DeepSeek through OpenCode Go (v4-pro for workers, verify,
+  refuter and validator; v4.1-flash for the rest). `go-minimax`: like `opencode-go`, but explore,
+  runner, publisher and the four review lenses on MiniMax M3, so code written by DeepSeek is
+  reviewed by another model; refuter and validator stay on DeepSeek. `plan-minimax-m3`: MiniMax
+  only; its writers and refuter use `minimax/MiniMax-M3.1-Flash-Preview`, which Pi's catalog lacks,
+  so `install.sh` adds it to the `minimax` provider in `models.json` with `pi/models-minimax.jq`
+  (only when missing; other providers, keys and entries are kept).
+- `bin/pi-perfil`: activates a saved profile (`pi-perfil <name>`, `pi-perfil list`). It validates
+  `~/.pi/gentle-ai/profiles/<name>.json`, adds or replaces it in `~/.pi/gentle-ai/profiles.json`
+  (backing that file up first) and marks it active, which gentle-pi uses to route subagents.
+  gentle-pi freezes the profile when a session starts: new sessions pick it up, open sessions need
+  `/gentle:profiles` → `<name>` → Enter, and `/reload` does not switch it. The profile is also
+  copied to `models.export.json` for `/gentle:models` → `r`.
+
+### Tests
+
+`tests/*.test.ts` run with Node's test runner; no dependencies beyond Node >= 22:
+
+```bash
+node --experimental-strip-types --test tests/*.test.ts
+```
+
+All 64 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
+the structure checker as a real process, the reply-length reminder, the START repair (33 cases), the
+profile switcher and the installer. Node's TypeScript stripping is experimental, so the flag is
+required on Node 22.
+
+## Uninstall
+
+```bash
+pi remove git:github.com/sdiazbarraza/pi-warden-gs   # or the source you installed
+rm -f <agent-dir>/APPEND_SYSTEM.md <agent-dir>/agents/gentle-ai-*.md ~/bin/pi-perfil
+rm -f ~/.claude/hooks/brief-guard.sh
+```
+
+Remove the `brief-guard.sh` entry from `~/.claude/settings.json`, and restore any `*.bak-<stamp>` or
+`extensions-backup-<stamp>/` files you want back.
+
+## Excluded
+
+`herdr-agent-state.ts` (managed by herdr) and the model assignments of agents that this package does
+not define.

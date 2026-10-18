@@ -1,0 +1,62 @@
+{
+  "kind": "gentle-pi.agent_model_routing",
+  "version": 1,
+  "agents": {
+    "gentle-ai-worker": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "high"
+    },
+    "gentle-ai-worker-infra": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "high"
+    },
+    "gentle-ai-verify": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "high"
+    },
+    "gentle-ai-brief-review": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "medium"
+    },
+    "gentle-ai-prompt-refine": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "medium"
+    },
+    "gentle-ai-explore": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "medium"
+    },
+    "gentle-ai-runner": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "medium"
+    },
+    "gentle-ai-publisher": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "low"
+    },
+    "review-risk": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "high"
+    },
+    "review-resilience": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "high"
+    },
+    "review-reliability": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "high"
+    },
+    "review-readability": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "medium"
+    },
+    "review-refuter": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "high"
+    },
+    "review-validator": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "high"
+    }
+  }
+}

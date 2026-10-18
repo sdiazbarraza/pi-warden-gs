@@ -1,0 +1,62 @@
+{
+  "kind": "gentle-pi.agent_model_routing",
+  "version": 1,
+  "agents": {
+    "gentle-ai-worker": {
+      "model": "minimax/MiniMax-M3.1-Flash-Preview",
+      "thinking": "high"
+    },
+    "gentle-ai-worker-infra": {
+      "model": "minimax/MiniMax-M3.1-Flash-Preview",
+      "thinking": "high"
+    },
+    "gentle-ai-verify": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "high"
+    },
+    "gentle-ai-brief-review": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "medium"
+    },
+    "gentle-ai-prompt-refine": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "medium"
+    },
+    "gentle-ai-explore": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "high"
+    },
+    "gentle-ai-runner": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "low"
+    },
+    "gentle-ai-publisher": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "low"
+    },
+    "review-risk": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "high"
+    },
+    "review-resilience": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "medium"
+    },
+    "review-reliability": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "medium"
+    },
+    "review-readability": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "medium"
+    },
+    "review-refuter": {
+      "model": "minimax/MiniMax-M3.1-Flash-Preview",
+      "thinking": "high"
+    },
+    "review-validator": {
+      "model": "minimax/MiniMax-M3",
+      "thinking": "high"
+    }
+  }
+}

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SHELL_BIN="${GENTLE_SHELL_BIN:-gentle-shell}"
+SHELL_MODE=""
+if command -v "$SHELL_BIN" >/dev/null 2>&1; then
+  read -r SHELL_MODE _ < <("$SHELL_BIN" home 2>/dev/null) || true
+fi
+
+if [[ -n "${GENTLE_PI_CONFIG_HOME:-}" ]]; then
+  GENTLE_DIR="$GENTLE_PI_CONFIG_HOME"
+elif [[ "$SHELL_MODE" == isolated ]]; then
+  GENTLE_DIR="${HOME}/.gentle-shell/gentle-ai"
+else
+  GENTLE_DIR="${HOME}/.pi/gentle-ai"
+fi
+
+PROFILES_DIR="${GENTLE_DIR}/profiles"
+PROFILES_FILE="${GENTLE_DIR}/profiles.json"
+EXPORT_FILE="${GENTLE_DIR}/models.export.json"
+
+usage() {
+  echo "Uso: pi-perfil <opencode-go|minimax-m3|list>"
+  echo "  list                     Lista perfiles guardados"
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+
+case "$1" in
+  list)
+    ls -1 "$PROFILES_DIR"/*.json 2>/dev/null || echo "No hay perfiles en $PROFILES_DIR"
+    ;;
+  opencode-go-minimax-m3|plan-minimax-m3|minimax-m3-clean|minimax-openai|deepseek|frontier-model|gpt|deepseek-minimax|opencode-go|go-minimax)
+    command -v jq >/dev/null 2>&1 || { echo "Error: se necesita jq" >&2; exit 1; }
+    SRC="$PROFILES_DIR/$1.json"
+
+    if [[ ! -f "$SRC" ]]; then
+      echo "No existe: $SRC"
+      exit 1
+    fi
+
+    if ! jq -e '.kind == "gentle-pi.agent_model_routing" and (.agents | type == "object")' "$SRC" >/dev/null 2>&1; then
+      echo "Error: $SRC no es un perfil válido" >&2
+      exit 1
+    fi
+
+    if [[ -f "$PROFILES_FILE" ]]; then
+      cp -p "$PROFILES_FILE" "$PROFILES_FILE.bak-$(date +%Y%m%d-%H%M%S)"
+      BASE="$PROFILES_FILE"
+    else
+      BASE=/dev/null
+    fi
+
+    TMP="$(mktemp "$GENTLE_DIR/.profiles.json.XXXXXX")"
+    trap 'rm -f "$TMP"' EXIT
+
+    jq -n --arg name "$1" --slurpfile src "$SRC" --slurpfile base <(cat "$BASE") '
+      ($base[0] // {kind: "gentle-pi.agent_model_profiles", version: 1, profiles: {}})
+      | .profiles = ((.profiles // {}) + {($name): $src[0].agents})
+      | .active = $name' > "$TMP"
+
+    mv "$TMP" "$PROFILES_FILE"
+    trap - EXIT
+    
+    cp "$SRC" "$EXPORT_FILE"
+
+    echo "Perfil '$1' activo en $PROFILES_FILE y copiado a models.export.json"
+echo "Sesiones abiertas: /gentle:profiles -> $1 -> Enter. Las sesiones nuevas ya lo toman."
+    ;;
+  *)
+    usage
+    ;;
+esac

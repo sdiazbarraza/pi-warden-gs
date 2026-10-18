@@ -1,0 +1,62 @@
+{
+  "kind": "gentle-pi.agent_model_routing",
+  "version": 1,
+  "agents": {
+    "gentle-ai-worker": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "gentle-ai-worker-infra": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "gentle-ai-verify": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "gentle-ai-brief-review": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "thinking": "medium"
+    },
+    "gentle-ai-prompt-refine": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "thinking": "medium"
+    },
+    "gentle-ai-explore": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "thinking": "high"
+    },
+    "gentle-ai-runner": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "thinking": "low"
+    },
+    "gentle-ai-publisher": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "thinking": "low"
+    },
+    "review-risk": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "thinking": "high"
+    },
+    "review-resilience": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "thinking": "medium"
+    },
+    "review-reliability": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "thinking": "medium"
+    },
+    "review-readability": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "thinking": "medium"
+    },
+    "review-refuter": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "thinking": "high"
+    },
+    "review-validator": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "thinking": "high"
+    }
+  }
+}
