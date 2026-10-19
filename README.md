@@ -52,7 +52,10 @@ cd pi-warden-gs
 
 `install.sh` is idempotent and deploys the parts Pi does not load from a package:
 
-1. Copies `pi/APPEND_SYSTEM.md` and the `pi/agents/*.md` definitions into `<agent-dir>`.
+1. Copies `pi/APPEND_SYSTEM.md` and the `pi/agents/*.md` definitions into `<agent-dir>`. Every
+   definition ships `model: provider/model` as a placeholder, so an install never inherits the
+   author's routing: a `model:` line you edited yourself is preserved, while `thinking:` always comes
+   from the package.
 2. Copies `bin/pi-perfil` to `~/bin/pi-perfil` and the routing profiles to
    `~/.pi/gentle-ai/profiles/`.
 3. Installs `hooks/brief-guard.sh` as the Claude Code `PreToolUse` hook in
@@ -67,16 +70,17 @@ cd pi-warden-gs
 Keep the cloned directory in place: Pi loads the extensions from it, and `/reload` (or a new
 session) activates changes in an open session.
 
-If the target machine lacks `openai-codex` or `minimax` models, give every bundled agent one model
-that is signed in there:
+The definitions ship the placeholder `model: provider/model`, so each install picks its own. Edit
+the `model:` line in `<agent-dir>/agents/*.md`, or set one model for every bundled agent at once:
 
 ```bash
 PI_WARDEN_GS_MODEL=deepseek/deepseek-v4-pro ~/pi-warden-gs/install.sh
 ```
 
-The value must be `provider/model`. Without the variable the bundled models are kept; the
-installer never changes Pi's default (orchestrator) model. `PI_OVERRIDES_MODEL` is still accepted as
-a legacy alias.
+The value must be `provider/model`. Re-running the installer keeps a `model:` line you already edited
+and restores `thinking:` from the package; the placeholder is written again only when a definition is
+new or still carries it. The installer never changes Pi's default (orchestrator) model.
+`PI_OVERRIDES_MODEL` is still accepted as a legacy alias.
 
 ### Option 3 — hooks and agents only
 
@@ -172,7 +176,7 @@ reviewed again.
 | From | To | Notes |
 | --- | --- | --- |
 | `pi/APPEND_SYSTEM.md` | `<agent-dir>/APPEND_SYSTEM.md` | Persistent global override appended to Pi's system prompt |
-| `pi/agents/*.md` | `<agent-dir>/agents/` | `gentle-ai-runner`, `-worker-infra`, `-publisher`, `-brief-review`, `-prompt-refine` |
+| `pi/agents/*.md` | `<agent-dir>/agents/` | `gentle-ai-runner`, `-worker-infra`, `-publisher`, `-brief-review`, `-prompt-refine`; `model:` ships as the placeholder `provider/model`, and a `model:` you edited is kept |
 | `pi/profiles/*.json` | `~/.pi/gentle-ai/profiles/` | Model routing per agent |
 | `pi/models-minimax.jq` | — | Used only to add a missing model to `models.json` |
 | `bin/pi-perfil` | `~/bin/pi-perfil` | Profile switcher, needs `jq` |
@@ -213,7 +217,8 @@ replaced, and the script can run repeatedly.
   brief review, memory, and the reply-length policy.
 - `pi/agents/*.md`: the subagent definitions used by these rules (`gentle-ai-runner`,
   `gentle-ai-worker-infra`, `gentle-ai-publisher`, `gentle-ai-brief-review`,
-  `gentle-ai-prompt-refine`).
+  `gentle-ai-prompt-refine`). Each ships `model: provider/model` as a placeholder that the installer
+  must replace, plus the `thinking:` level the author picked for that role.
 - `pi/profiles/*.json`: model-routing profiles for the gentle-ai and review agents.
   `deepseek`: DeepSeek only (v4-pro for writers, verify and reviewers; flash for runner and
   publisher). `deepseek-minimax`: writers on DeepSeek, reviewers on MiniMax M3. `gpt`: GPT only
@@ -224,8 +229,12 @@ replaced, and the script can run repeatedly.
   only; its writers and refuter use `minimax/MiniMax-M3.1-Flash-Preview`, which Pi's catalog lacks,
   so `install.sh` adds it to the `minimax` provider in `models.json` with `pi/models-minimax.jq`
   (only when missing; other providers, keys and entries are kept).
-- `bin/pi-perfil`: activates a saved profile (`pi-perfil <name>`, `pi-perfil list`). It validates
-  `~/.pi/gentle-ai/profiles/<name>.json`, adds or replaces it in `~/.pi/gentle-ai/profiles.json`
+- `bin/pi-perfil`: activates any routing profile saved in `~/.pi/gentle-ai/profiles/` (`pi-perfil
+  <name>`, `pi-perfil list`), reading the connected providers from Pi's `auth.json` and warning, without
+  blocking, about a profile whose provider Pi has no credentials for. `pi-perfil suggest --model
+  provider/model [profile]` writes `<profile>-suggested.json` with the models of unconnected providers
+  replaced by the one you pass, and writes nothing when everything is already reachable. Activation
+  validates `~/.pi/gentle-ai/profiles/<name>.json`, adds or replaces it in `~/.pi/gentle-ai/profiles.json`
   (backing that file up first) and marks it active, which gentle-pi uses to route subagents.
   gentle-pi freezes the profile when a session starts: new sessions pick it up, open sessions need
   `/gentle:profiles` → `<name>` → Enter, and `/reload` does not switch it. The profile is also

@@ -1,7 +1,7 @@
 ---
 name: gentle-ai-worker-infra
 description: Scoped implementation writer for Docker, Compose and environment work (Dockerfiles, compose files, container runtime checks). Edits code, runs focused tests, and returns review-ready evidence without committing.
-model: deepseek/deepseek-v4-pro
+model: provider/model
 thinking: high
 tools: read, grep, find, edit, write, bash, mem_save, mcp
 ---

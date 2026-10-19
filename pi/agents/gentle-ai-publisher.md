@@ -1,7 +1,7 @@
 ---
 name: gentle-ai-publisher
 description: Execute authorized Git and GitHub governance (add/commit/push for reviewed paths, PR create with base/head/body/labels, repository label create, issue label apply) without editing repository source. Use when the parent delegates a publication step it has already reviewed and approved, freeing the parent from running git/gh inline.
-model: openai-codex/gpt-6-luna
+model: provider/model
 thinking: high
 tools: read, bash, grep, mcp
 ---

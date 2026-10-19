@@ -1,7 +1,7 @@
 ---
 name: gentle-ai-runner
 description: Execute infra commands (docker, psql, curl, docker compose, redis-cli) without touching repository files. Use when gentle-ai-worker rejects a task because it has no repository file edits, or when the parent explicitly delegates an infra-only task to free the parent from running shell commands inline. Not for investigation or repository exploration; use gentle-ai-explore.
-model: openai-codex/gpt-6-luna
+model: provider/model
 thinking: medium
 tools: read, grep, find, edit, write, bash, mem_save, mcp
 ---

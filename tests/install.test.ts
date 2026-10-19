@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -20,8 +20,10 @@ function setup(mode: "link" | "isolated") {
   const env = { ...process.env, HOME: home, GENTLE_SHELL_BIN: shell, PATH: process.env.PATH ?? "" }
   delete (env as Record<string, string | undefined>).PI_CODING_AGENT_DIR
   delete (env as Record<string, string | undefined>).PI_BIN
-  const out = spawnSync("bash", [INSTALL], { encoding: "utf8", env })
-  return { home, agent, out }
+  const rerun = (extra: Record<string, string> = {}) =>
+    spawnSync("bash", [INSTALL], { encoding: "utf8", env: { ...env, ...extra } })
+  const out = rerun()
+  return { home, agent, out, rerun }
 }
 
 test("isolated gentle-shell home: files go to the gentle-shell agent and config homes", () => {
@@ -45,4 +47,54 @@ test("link gentle-shell home: files go to ~/.pi/agent and ~/.pi/gentle-ai", () =
   assert.equal(out.status, 0, out.stderr)
   assert.ok(existsSync(join(home, ".pi", "agent", "APPEND_SYSTEM.md")))
   assert.ok(existsSync(join(home, ".pi", "gentle-ai", "profiles", "gpt.json")))
+})
+
+// The agent definitions ship a placeholder model: whoever installs must choose their own.
+test("a fresh install writes the placeholder model so the user picks their own", () => {
+  const { agent, out } = setup("link")
+  assert.equal(out.status, 0, out.stderr)
+  const publisher = readFileSync(join(agent, "agents", "gentle-ai-publisher.md"), "utf8")
+  assert.match(publisher, /^model: provider\/model$/m)
+  assert.match(publisher, /^thinking: high$/m)
+  assert.match(out.stdout, /placeholder/)
+})
+
+test("an agent whose model the user chose keeps it, and takes the rest from the package", () => {
+  const { agent, rerun } = setup("link")
+  const file = join(agent, "agents", "gentle-ai-publisher.md")
+  writeFileSync(file, readFileSync(file, "utf8").replace(/^model: .*$/m, "model: minimax/MiniMax-M3.1-Flash-Preview"))
+  const out = rerun()
+  assert.equal(out.status, 0, out.stderr)
+  assert.match(readFileSync(file, "utf8"), /^model: minimax\/MiniMax-M3\.1-Flash-Preview$/m)
+  assert.match(out.stdout, /unchanged .*gentle-ai-publisher\.md/)
+  assert.equal(readdirSync(join(agent, "agents")).some((f) => f.startsWith("gentle-ai-publisher.md.bak-")), false)
+})
+
+test("thinking always comes from the package, even when the user edited it", () => {
+  const { agent, rerun } = setup("link")
+  const file = join(agent, "agents", "gentle-ai-runner.md")
+  writeFileSync(file, readFileSync(file, "utf8").replace(/^thinking: .*$/m, "thinking: low"))
+  const out = rerun()
+  assert.equal(out.status, 0, out.stderr)
+  assert.match(readFileSync(file, "utf8"), /^thinking: medium$/m)
+})
+
+test("an untouched placeholder is overwritten by the package text", () => {
+  const { agent, rerun } = setup("link")
+  const file = join(agent, "agents", "gentle-ai-runner.md")
+  writeFileSync(file, readFileSync(file, "utf8") + "\nlocal edit\n")
+  const out = rerun()
+  assert.equal(out.status, 0, out.stderr)
+  const after = readFileSync(file, "utf8")
+  assert.doesNotMatch(after, /local edit/)
+  assert.match(after, /^model: provider\/model$/m)
+})
+
+test("PI_WARDEN_GS_MODEL overrides a model the user had chosen", () => {
+  const { agent, rerun } = setup("link")
+  const file = join(agent, "agents", "gentle-ai-publisher.md")
+  writeFileSync(file, readFileSync(file, "utf8").replace(/^model: .*$/m, "model: minimax/MiniMax-M3.1-Flash-Preview"))
+  const out = rerun({ PI_WARDEN_GS_MODEL: "deepseek/deepseek-v4-pro" })
+  assert.equal(out.status, 0, out.stderr)
+  assert.match(readFileSync(file, "utf8"), /^model: deepseek\/deepseek-v4-pro$/m)
 })

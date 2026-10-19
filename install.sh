@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Installs the pi-warden-gs package: copies config files, wires settings and registers the pi package.
+# Agent definitions ship a placeholder model: a model the user already chose is preserved, while
+# `thinking:` always comes from the package.
 set -euo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 1; }
@@ -29,6 +31,8 @@ if [ -n "$MODEL_OVERRIDE" ] && ! [[ "$MODEL_OVERRIDE" =~ ^[A-Za-z0-9._-]+/[A-Za-
   echo "error: PI_WARDEN_GS_MODEL must look like provider/model (got: $MODEL_OVERRIDE)" >&2
   exit 1
 fi
+# The definitions ship this as their model so nobody inherits someone else's routing.
+PLACEHOLDER_MODEL="provider/model"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -60,16 +64,31 @@ place() {
 }
 
 place "$PKG_DIR/pi/APPEND_SYSTEM.md" "$PI_HOME/APPEND_SYSTEM.md"
+# An `model:` line the user already edited wins over the placeholder; `thinking:` always comes from
+# the package. The placeholder reaches the agent only on a first install or while it is untouched.
 for agent in "$PKG_DIR"/pi/agents/*.md; do
-  src="$agent"
+  name="$(basename "$agent")"
+  dst="$PI_HOME/agents/$name"
+  model=""
   if [ -n "$MODEL_OVERRIDE" ]; then
-    # Rewrite only the first `model:` line (the frontmatter one).
-    src="$WORK_DIR/$(basename "$agent")"
-    awk -v m="$MODEL_OVERRIDE" '!done && /^model:/ { print "model: " m; done = 1; next } { print }' "$agent" > "$src"
+    model="$MODEL_OVERRIDE"
+  elif [ -f "$dst" ]; then
+    chosen="$(sed -n 's/^model:[[:space:]]*//p' "$dst" | head -n 1)"
+    if [ -n "$chosen" ] && [ "$chosen" != "$PLACEHOLDER_MODEL" ]; then model="$chosen"; fi
   fi
-  place "$src" "$PI_HOME/agents/$(basename "$agent")"
+  src="$agent"
+  if [ -n "$model" ]; then
+    # Rewrite only the first `model:` line (the frontmatter one).
+    src="$WORK_DIR/$name"
+    awk -v m="$model" '!done && /^model:/ { print "model: " m; done = 1; next } { print }' "$agent" > "$src"
+  fi
+  place "$src" "$dst"
 done
-if [ -n "$MODEL_OVERRIDE" ]; then echo "agents use model $MODEL_OVERRIDE"; fi
+if [ -n "$MODEL_OVERRIDE" ]; then
+  echo "agents use model $MODEL_OVERRIDE"
+else
+  echo "agent models: $PLACEHOLDER_MODEL in $PI_HOME/agents/*.md is a placeholder; edit it or rerun with PI_WARDEN_GS_MODEL=provider/model"
+fi
 place "$PKG_DIR/hooks/brief-guard.sh" "$CLAUDE_HOME/hooks/brief-guard.sh"
 chmod 755 "$CLAUDE_HOME/hooks/brief-guard.sh"
 place "$PKG_DIR/bin/pi-perfil" "$HOME/bin/pi-perfil"
