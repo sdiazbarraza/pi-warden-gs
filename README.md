@@ -92,7 +92,7 @@ files are plain Pi extensions if you prefer to load them with `-e`.
 
 ```bash
 pi list                                  # the package appears
-node --experimental-strip-types --test tests/*.test.ts    # 64 tests, all passing
+node --experimental-strip-types --test tests/*.test.ts    # 83 tests, all passing
 chmod 755 hooks/brief-guard.sh           # only if you copied it by hand
 ```
 
@@ -208,6 +208,14 @@ replaced, and the script can run repeatedly.
   `committedOnly` arrived as `"true"`/`1` (and deletes it for the `"false"`/`0` shapes the contract
   rejects). Its README documents the exact scope and the deliberate limitation. Delete the file once
   the upstream fix lands.
+- `extensions/gentle-review-capture-guard.ts`: blocks a `gentle_review_capture` or
+  `gentle_review_capture_group` call whose `collectBinding` (or any item of `collectBindings`) mixes
+  a string top-level scalar with a number or a boolean, which is what a rewritten binding looks
+  like: a provider collect input carries every top-level scalar as a string. The block names the
+  key and the value and asks for a verbatim re-copy. It never repairs, re-serializes or normalizes a
+  binding — the original value is not in the extension, so guessing one would only mint a second
+  wrong digest — and it fails open, passing through any call it cannot inspect. Set
+  `GENTLE_AI_DEBUG_BINDING_GUARD=1` for one stderr line per block.
 - `extensions/rtk.ts`: rtk integration for bash command rewriting.
 
 ### Hooks, agents and configuration
@@ -248,9 +256,9 @@ replaced, and the script can run repeatedly.
 node --experimental-strip-types --test tests/*.test.ts
 ```
 
-All 64 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
-the structure checker as a real process, the reply-length reminder, the START repair (33 cases), the
-profile switcher and the installer. Node's TypeScript stripping is experimental, so the flag is
+All 83 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
+the structure checker as a real process, the reply-length reminder, the START repair, the capture
+binding tripwire (7 cases), the profile switcher and the installer. Node's TypeScript stripping is experimental, so the flag is
 required on Node 22.
 
 ## Uninstall

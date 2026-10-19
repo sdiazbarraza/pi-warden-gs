@@ -1,6 +1,6 @@
 {
   "name": "pi-warden-gs",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "keywords": [
@@ -11,7 +11,8 @@
       "./extensions/safety-guard.ts",
       "./extensions/rtk.ts",
       "./extensions/reply-length.ts",
-      "./extensions/gentle-review-start-repair.ts"
+      "./extensions/gentle-review-start-repair.ts",
+      "./extensions/gentle-review-capture-guard.ts"
     ]
   },
   "peerDependencies": {
