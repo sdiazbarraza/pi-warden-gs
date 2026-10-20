@@ -92,7 +92,7 @@ files are plain Pi extensions if you prefer to load them with `-e`.
 
 ```bash
 pi list                                  # the package appears
-node --experimental-strip-types --test tests/*.test.ts    # 88 tests, all passing
+node --experimental-strip-types --test tests/*.test.ts    # 94 tests, all passing
 chmod 755 hooks/brief-guard.sh           # only if you copied it by hand
 ```
 
@@ -209,10 +209,13 @@ replaced, and the script can run repeatedly.
   rejects). Its README documents the exact scope and the deliberate limitation. Delete the file once
   the upstream fix lands.
 - `extensions/gentle-review-capture-guard.ts`: blocks a `gentle_review_capture` or
-  `gentle_review_capture_group` call whose `collectBinding` (or any item of `collectBindings`) mixes
-  a string top-level scalar with a number or a boolean, which is what a rewritten binding looks
-  like: a provider collect input carries every top-level scalar as a string. The block names the
-  key and the value and asks for a verbatim re-copy. It never repairs, re-serializes or normalizes a
+  `gentle_review_capture_group` call whose `collectBinding` (or any item of `collectBindings`) is not
+  the exact string the provider issued. It names five causes: a top-level scalar that mixes a string
+  with a number or a boolean (what a rewritten binding looks like, since a provider collect input
+  carries every top-level scalar as a string); the same mix inside a serialized payload; a string
+  that is not valid JSON (a mangled string); a binding that arrives as an object instead of the
+  issued string; and a binding that is not a string at all. The block names the field, the key and
+  the value and asks for a verbatim re-copy. It never repairs, re-serializes or normalizes a
   binding — the original value is not in the extension, so guessing one would only mint a second
   wrong digest — and it fails open, passing through any call it cannot inspect. Set
   `GENTLE_AI_DEBUG_BINDING_GUARD=1` for one stderr line per block.
@@ -256,9 +259,9 @@ replaced, and the script can run repeatedly.
 node --experimental-strip-types --test tests/*.test.ts
 ```
 
-All 88 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
+All 94 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
 the structure checker as a real process, the reply-length reminder, the START repair, the capture
-binding tripwire (7 cases), the profile switcher and the installer. Node's TypeScript stripping is experimental, so the flag is
+binding tripwire (13 cases), the profile switcher and the installer. Node's TypeScript stripping is experimental, so the flag is
 required on Node 22.
 
 ## Uninstall
