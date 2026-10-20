@@ -1,4 +1,4 @@
-// gentle-review-capture-guard — local Pi extension, tripwire for a retyped capture binding.
+// gentle-review-capture-guard — local Pi extension, tripwire for a rewritten capture binding.
 // Evaluation: `odd/tasks/capture-binding-tripwire-evaluation.md` (gentle-shell-parch working copy,
 // 2026-10-18). Delete this file once the mirrored contract stops needing the reminder.
 //
@@ -8,17 +8,24 @@
 // the cause. One session burned five blind retries on it.
 //
 // What: a `tool_call` handler that inspects `collectBinding` and each item of `collectBindings` of
-// `gentle_review_capture` / `gentle_review_capture_group`, and blocks when a binding's top-level
-// scalars mix a string with a number or a boolean. A provider collect input carries every top-level
-// scalar as a string (`ReviewCollectInputV3`: name, schema, captureOperation, baseTree, candidateTree),
-// so that mix is a rewritten binding and nothing else.
+// `gentle_review_capture` / `gentle_review_capture_group`, and blocks a binding that is not the
+// exact string the provider issued. Five causes are named:
+//   1. a top-level scalar that mixes a string with a number or a boolean (a rewritten binding);
+//   2. the same mix inside a serialized binding whose payload was rewritten;
+//   3. a string that is not valid JSON (a mangled string, e.g. one stray closing brace);
+//   4. a binding that arrives as an object instead of the issued string;
+//   5. a binding that arrives as something other than a string or an object.
+// Cause 4 is a change of the L28 evidence: the controller matches the issued bytes, so a
+// re-serialized object copy is rejected downstream with "collectBindings must be the complete
+// distinct current reviewer group in exact provider order", after the forecast already cost a
+// call. Blocking it here names the cause instead of burning the call.
 //
 // Never repairs a value: the original is not in the extension, so guessing one would only mint a
 // second wrong digest. The block names the key and the value and asks for a verbatim re-copy; no
 // code path writes `event.input` or any binding.
 //
-// Scope: those two tools and those two fields only. A serialized JSON string binding is left exactly
-// as it arrived: it is not parsed, re-serialized or replaced.
+// Scope: those two tools and those two fields only. A serialized JSON string binding is parsed to
+// validate it, but it is never re-serialized, normalized or replaced.
 //
 // Fail-open: every path is wrapped, so an internal error passes the call through unchanged and the
 // controller reports its own rejection, like gentle-review-start-repair.ts.
@@ -35,14 +42,26 @@ export const CAPTURE_TOOLS: readonly string[] = ["gentle_review_capture", "gentl
 
 const DEBUG_ENV = "GENTLE_AI_DEBUG_BINDING_GUARD";
 
+/** Every cause the guard can name, one per blocking rule. */
+export type CaptureBindingViolationKind =
+	| "retyped-scalar"
+	| "retyped-scalar-in-string"
+	| "invalid-json"
+	| "object-form"
+	| "not-a-string";
+
 export interface CaptureBindingViolation {
 	/** The inspected field, as the call spells it. */
 	readonly field: "collectBinding" | "collectBindings";
 	/** Position inside `collectBindings`; -1 for the single `collectBinding`. */
 	readonly index: number;
+	/** Which rule fired. */
+	readonly kind: CaptureBindingViolationKind;
 	/** Key of the top-level scalar that arrived as a number or a boolean. */
-	readonly key: string;
-	readonly value: number | boolean;
+	readonly key?: string;
+	readonly value?: number | boolean;
+	/** Extra context: the JSON parse error, or the type of a non-string binding. */
+	readonly detail?: string;
 }
 
 /**
@@ -60,6 +79,41 @@ export function retypedBindingScalar(binding: unknown): { key: string; value: nu
 }
 
 /**
+ * The rule that fires for one binding value, or undefined when the value is exactly what the
+ * provider issued: one string that parses as JSON. Read-only: it never writes the binding.
+ */
+function bindingViolation(
+	field: "collectBinding" | "collectBindings",
+	index: number,
+	binding: unknown,
+): CaptureBindingViolation | undefined {
+	if (typeof binding === "string") {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(binding);
+		} catch (error) {
+			return {
+				field,
+				index,
+				kind: "invalid-json",
+				detail: error instanceof Error ? error.message : String(error),
+			};
+		}
+		const offender = retypedBindingScalar(parsed);
+		return offender === undefined
+			? undefined
+			: { field, index, kind: "retyped-scalar-in-string", key: offender.key, value: offender.value };
+	}
+	if (typeof binding === "object" && binding !== null && !Array.isArray(binding)) {
+		const offender = retypedBindingScalar(binding);
+		return offender === undefined
+			? { field, index, kind: "object-form" }
+			: { field, index, kind: "retyped-scalar", key: offender.key, value: offender.value };
+	}
+	return { field, index, kind: "not-a-string", detail: typeof binding };
+}
+
+/**
  * The first retyped binding a capture call carries, or undefined when it carries none. `collectBinding`
  * is inspected first, then each item of `collectBindings` in the order the call declares them.
  */
@@ -67,30 +121,55 @@ export function findCaptureBindingViolation(toolName: string, input: unknown): C
 	if (!CAPTURE_TOOLS.includes(toolName)) return undefined;
 	if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
 	const parameters = input as Record<string, unknown>;
-	const single = retypedBindingScalar(parameters.collectBinding);
-	if (single !== undefined) {
-		return { field: "collectBinding", index: -1, key: single.key, value: single.value };
+	if (parameters.collectBinding !== undefined) {
+		const single = bindingViolation("collectBinding", -1, parameters.collectBinding);
+		if (single !== undefined) return single;
 	}
 	const group = parameters.collectBindings;
 	if (!Array.isArray(group)) return undefined;
 	for (let index = 0; index < group.length; index += 1) {
-		const offender = retypedBindingScalar(group[index]);
-		if (offender !== undefined) {
-			return { field: "collectBindings", index, key: offender.key, value: offender.value };
-		}
+		const offender = bindingViolation("collectBindings", index, group[index]);
+		if (offender !== undefined) return offender;
 	}
 	return undefined;
+}
+
+/** The cause of one violation, in one sentence. */
+function causeSentence(violation: CaptureBindingViolation): string {
+	switch (violation.kind) {
+		case "retyped-scalar":
+			return (
+				`carries the ${typeof violation.value} ${String(violation.value)} at "${violation.key}" while its ` +
+				"other scalars are strings: the binding was rewritten instead of re-sent, so its digest no longer matches"
+			);
+		case "retyped-scalar-in-string":
+			return (
+				`carries the ${typeof violation.value} ${String(violation.value)} at "${violation.key}" inside the ` +
+				"serialized binding while its other scalars are strings: the payload was rewritten instead of re-sent, " +
+				"so its digest no longer matches"
+			);
+		case "invalid-json":
+			return (
+				`is not valid JSON (${violation.detail}): the string was mangled on the way in, ` +
+				"so the provider cannot match it"
+			);
+		case "object-form":
+			return (
+				"arrives as an object instead of the exact string the provider issued: the controller matches " +
+				"the issued bytes, so a re-serialized copy is rejected downstream"
+			);
+		case "not-a-string":
+			return `arrives as a ${violation.detail} instead of the exact string the provider issued`;
+	}
 }
 
 /** The block message: the cause, the key, the value, and the only correct repair — a verbatim re-copy. */
 export function captureBindingBlockReason(toolName: string, violation: CaptureBindingViolation): string {
 	const where = violation.field === "collectBinding" ? "collectBinding" : `collectBindings[${violation.index}]`;
-	const { key, value } = violation;
 	return (
-		`gentle-review-capture-guard: ${toolName} is blocked because ${where} carries the ${typeof value} ${String(value)} ` +
-		`at "${key}" while its other scalars are strings: the binding was rewritten instead of re-sent, so its digest no longer matches. ` +
-		`Never repair, re-serialize or normalize it: run review status again, re-copy the binding verbatim exactly as the provider emitted it, ` +
-		`and call ${toolName} once.`
+		`gentle-review-capture-guard: ${toolName} is blocked because ${where} ${causeSentence(violation)}. ` +
+		`Never repair, re-serialize or normalize it: run review status again, re-copy the binding verbatim exactly ` +
+		`as the provider emitted it, and call ${toolName} once.`
 	);
 }
 

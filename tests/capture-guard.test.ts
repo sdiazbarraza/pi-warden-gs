@@ -68,7 +68,7 @@ test("blocks a capture binding retyped to a number, naming key and value", async
 
 test("blocks the retyped binding of a group capture at its own index", async () => {
   const run = handler()
-  const event = groupCall("gentle_review_capture_group", [providerBinding(), { ...providerBinding(), value: true }])
+  const event = groupCall("gentle_review_capture_group", [JSON.stringify(providerBinding()), { ...providerBinding(), value: true }])
   const before = structuredClone(event)
   const result = (await run(event)) as { block?: boolean; reason?: string } | undefined
   assert.equal(result?.block, true, "expected the retyped group binding to be blocked")
@@ -80,7 +80,11 @@ test("blocks the retyped binding of a group capture at its own index", async () 
   assert.deepEqual(event, before, "the guard must never change the call")
 })
 
-test("passes an all-string binding through byte-identical", async () => {
+// Adapted: the object form of a binding is now blocked. The provider issues the binding as one
+// exact string and the controller matches its bytes, so a re-serialized object is rejected
+// downstream ("collectBindings must be the complete distinct current reviewer group in exact
+// provider order"). Blocking it here names the cause instead of burning a call.
+test("blocks a binding that arrives as an object instead of the issued string", async () => {
   const run = handler()
   const cases = [
     captureCall("gentle_review_capture", providerBinding()),
@@ -88,11 +92,74 @@ test("passes an all-string binding through byte-identical", async () => {
     captureCall("gentle_review_capture", { ...providerBinding(), arguments: [{ name: "order", value: "0" }] }),
   ] as const
   for (const event of cases) {
-    const before = JSON.stringify(event)
-    const result = await run(event)
-    assert.equal(result, undefined, `${event.toolName}: expected no block, got ${JSON.stringify(result)}`)
-    assert.equal(JSON.stringify(event), before, `${event.toolName}: expected a byte-identical pass-through`)
+    const before = structuredClone(event)
+    const result = (await run(event)) as { block?: boolean; reason?: string } | undefined
+    assert.equal(result?.block, true, `${event.toolName}: expected the object form to be blocked`)
+    assert.match(result?.reason ?? "", /object/i, "reason must name the object form")
+    assert.match(result?.reason ?? "", /verbatim/i, "reason must ask for a verbatim re-copy")
+    assert.deepEqual(event, before, `${event.toolName}: the guard must never change the call`)
   }
+})
+
+test("blocks the object form inside a group and names its index", async () => {
+  const run = handler()
+  const event = groupCall("gentle_review_capture_group", [JSON.stringify(providerBinding()), providerBinding()])
+  const before = structuredClone(event)
+  const result = (await run(event)) as { block?: boolean; reason?: string } | undefined
+  assert.equal(result?.block, true, "expected the object form of a group member to be blocked")
+  assert.match(result?.reason ?? "", /collectBindings\[1\]/)
+  assert.match(result?.reason ?? "", /object/i)
+  assert.match(result?.reason ?? "", /verbatim/i)
+  assert.deepEqual(event, before, "the guard must never change the call")
+})
+
+test("blocks a malformed JSON string binding and names the field", async () => {
+  const run = handler()
+  const malformed = '{"arguments":[{"name":"order","token":"--order=0","value":"0"}],"extra":}}'
+  const event = captureCall("gentle_review_capture", malformed)
+  const before = structuredClone(event)
+  const result = (await run(event)) as { block?: boolean; reason?: string } | undefined
+  assert.equal(result?.block, true, "expected the malformed string to be blocked")
+  assert.match(result?.reason ?? "", /collectBinding\b/)
+  assert.match(result?.reason ?? "", /JSON/i, "reason must name the invalid JSON")
+  assert.match(result?.reason ?? "", /verbatim/i, "reason must ask for a verbatim re-copy")
+  assert.deepEqual(event, before, "the guard must never change the call")
+})
+
+test("blocks a malformed JSON string inside a group and names its index", async () => {
+  const run = handler()
+  const malformed = '{"name":"reviewer_result",}}'
+  const event = groupCall("gentle_review_capture_group", [JSON.stringify(providerBinding()), malformed])
+  const before = structuredClone(event)
+  const result = (await run(event)) as { block?: boolean; reason?: string } | undefined
+  assert.equal(result?.block, true, "expected the malformed group member to be blocked")
+  assert.match(result?.reason ?? "", /collectBindings\[1\]/)
+  assert.match(result?.reason ?? "", /JSON/i)
+  assert.match(result?.reason ?? "", /verbatim/i)
+  assert.deepEqual(event, before, "the guard must never change the call")
+})
+
+test("blocks a serialized binding whose payload retypes a scalar to a number", async () => {
+  const run = handler()
+  const retyped = JSON.stringify({ ...providerBinding(), value: 1 })
+  const event = captureCall("gentle_review_capture", retyped)
+  const before = structuredClone(event)
+  const result = (await run(event)) as { block?: boolean; reason?: string } | undefined
+  assert.equal(result?.block, true, "expected the retyped serialized binding to be blocked")
+  assert.match(result?.reason ?? "", /"value"/, "reason must name the offending key")
+  assert.match(result?.reason ?? "", /\bnumber 1\b/, "reason must name the offending value")
+  assert.match(result?.reason ?? "", /verbatim/i)
+  assert.deepEqual(event, before, "the guard must never change the call")
+})
+
+test("blocks a binding that is not a string at all", async () => {
+  const run = handler()
+  const event = captureCall("gentle_review_capture", 7)
+  const before = structuredClone(event)
+  const result = (await run(event)) as { block?: boolean; reason?: string } | undefined
+  assert.equal(result?.block, true, "expected a non-string binding to be blocked")
+  assert.match(result?.reason ?? "", /verbatim/i)
+  assert.deepEqual(event, before, "the guard must never change the call")
 })
 
 test("passes a serialized JSON string binding through unchanged", async () => {
@@ -158,4 +225,25 @@ test("writes one debug line for a blocked call only under the debug env var", as
   assert.match(withDebug[0]!, /"value"/)
   const withoutDebug = await captureStderr(() => run(retyped()))
   assert.deepEqual(withoutDebug, [], "nothing is written without the debug env var")
+})
+
+test("writes one debug line for each new violation kind", async () => {
+  const run = handler()
+  const cases = [
+    ["object form", captureCall("gentle_review_capture", providerBinding())],
+    ["invalid JSON", captureCall("gentle_review_capture", '{"name":}}')],
+    ["retyped scalar inside a string", captureCall("gentle_review_capture", JSON.stringify({ ...providerBinding(), value: 1 }))],
+  ] as const
+  for (const [id, event] of cases) {
+    const lines = await captureStderr(async () => {
+      process.env.GENTLE_AI_DEBUG_BINDING_GUARD = "1"
+      try {
+        await run(event)
+      } finally {
+        delete process.env.GENTLE_AI_DEBUG_BINDING_GUARD
+      }
+    })
+    assert.equal(lines.length, 1, `${id}: expected one stderr line, got ${JSON.stringify(lines)}`)
+    assert.match(lines[0]!, /^\[gentle-review-capture-guard] /, id)
+  }
 })
