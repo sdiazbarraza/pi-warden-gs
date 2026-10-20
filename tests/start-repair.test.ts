@@ -122,3 +122,58 @@ test("normalizes committedOnly only for a repairable ordinary START", async () =
     if (parsed !== undefined) assert.equal(JSON.stringify(parsed.baseRef), JSON.stringify(payload.baseRef), `${id}: baseRef changed`)
   }
 })
+
+// Envelope repair: the observed MiniMax failure relocates the tool's own top-level parameters
+// inside `input`, so the handler above bails out at `parameters.operation !== "start"` and the
+// controller answers "operation: must have required properties operation". These cases pin the
+// hoisting rule: recognised keys move back up only when their top-level slot is empty.
+const ENVELOPE_KEYS = ["operation", "input", "baseRef", "committedOnly", "idempotencyKey", "workspaceRoot"] as const
+
+test("hoists the relocated tool parameters back to the top level", async () => {
+  const payload = { mode: "ordinary", baseRef: "0".repeat(40), committedOnly: true, lenses: "risk,reliability", lensesReason: "probe" }
+  const event = {
+    toolName: "gentle_review",
+    input: { input: { operation: "start", baseRef: payload.baseRef, committedOnly: true, input: payload } },
+  }
+  await handler()(event)
+  const parameters = event.input as any
+  assert.equal(parameters.operation, "start", "operation was not hoisted")
+  assert.equal(parameters.baseRef, payload.baseRef, "baseRef was not hoisted")
+  assert.equal(parameters.committedOnly, true, "committedOnly was not hoisted")
+  const parsed = typeof parameters.input === "string" ? JSON.parse(parameters.input) : parameters.input
+  assert.deepEqual(parsed.lenses, ["review-risk", "review-reliability"], `lenses were not repaired: ${JSON.stringify(parsed.lenses)}`)
+})
+
+test("leaves a call alone when the top level already carries its own parameters", async () => {
+  const event = reviewCall("start", { mode: "ordinary", lenses: [...LENSES], lensesReason: "probe" })
+  const before = structuredClone(event)
+  await handler()(event)
+  assert.deepEqual(event.input, before.input, "a well-formed call was modified")
+})
+
+test("hoists nothing for a tool other than gentle_review", async () => {
+  const event = { toolName: "bash", input: { input: { operation: "start", input: { mode: "ordinary" } } } }
+  const before = structuredClone(event)
+  await handler()(event)
+  assert.deepEqual(event.input, before.input, "another tool was modified")
+})
+
+test("does not hoist a key the caller already set at the top level", async () => {
+  const event = { toolName: "gentle_review", input: { operation: "status", input: { operation: "start", baseRef: "HEAD" } } }
+  await handler()(event)
+  const parameters = event.input as any
+  assert.equal(parameters.operation, "status", "an explicit top-level operation was overwritten")
+  assert.equal(parameters.baseRef, undefined, "baseRef was hoisted even though the top level did not name one")
+})
+
+test("every recognised envelope key survives a round trip", async () => {
+  for (const key of ENVELOPE_KEYS) {
+    const nested: Record<string, unknown> = { operation: "status" }
+    if (key !== "operation") nested[key] = key === "committedOnly" ? true : `value-${key}`
+    const event = { toolName: "gentle_review", input: { input: nested } }
+    await handler()(event)
+    const parameters = event.input as any
+    if (key === "operation") assert.equal(parameters.operation, "status", `${key} was not hoisted`)
+    else assert.equal(parameters[key], nested[key], `${key} was not hoisted`)
+  }
+})

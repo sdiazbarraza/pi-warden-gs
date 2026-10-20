@@ -92,7 +92,7 @@ files are plain Pi extensions if you prefer to load them with `-e`.
 
 ```bash
 pi list                                  # the package appears
-node --experimental-strip-types --test tests/*.test.ts    # 83 tests, all passing
+node --experimental-strip-types --test tests/*.test.ts    # 88 tests, all passing
 chmod 755 hooks/brief-guard.sh           # only if you copied it by hand
 ```
 
@@ -137,7 +137,7 @@ export default function (pi: ExtensionAPI) {
 | `safety-guard.ts` | `tool_call` | Blocks destructive bash commands, blocks direct delivery commands outside `gentle-ai-publisher`, blocks heavy builds in the orchestrator, and gates writer dispatch on a reviewed brief | Fail-**closed** on writer dispatch (any guard error blocks), fail-open on the bash destructive check |
 | `brief-guard.sh` (hook) | Claude Code `PreToolUse`, and spawned by `safety-guard` | Checks the eight required brief sections, their order and the literal stop-and-report clause | Fail-open on parsing, exit 2 on a malformed brief |
 | `reply-length.ts` | `before_agent_start` | Adds one hidden reminder per user-started run of the main session: at most 5 lines of at most 25 words, outcome first, long content in a file | Cannot fail: it only appends a message |
-| `gentle-review-start-repair.ts` | `tool_call` | Repairs a `gentle_review` START whose `lenses`, `lensesReason` or `committedOnly` arrived mangled, so the call is not rejected as `lenses-invalid` | Fail-open: any internal error passes the call through unchanged |
+| `gentle-review-start-repair.ts` | `tool_call` | Repairs a `gentle_review` START whose `lenses`, `lensesReason` or `committedOnly` arrived mangled, so the call is not rejected as `lenses-invalid`; a call whose top-level parameters were relocated inside `input` has that envelope restored first | Fail-open: any internal error passes the call through unchanged |
 | `rtk.ts` | `tool_call` | Rewrites bash commands to use `rtk` for token savings | Leaves commands alone when it cannot rewrite them |
 
 A `tool_call` handler runs before the tool and may mutate `event.input`; Pi performs no validation
@@ -256,7 +256,7 @@ replaced, and the script can run repeatedly.
 node --experimental-strip-types --test tests/*.test.ts
 ```
 
-All 83 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
+All 88 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
 the structure checker as a real process, the reply-length reminder, the START repair, the capture
 binding tripwire (7 cases), the profile switcher and the installer. Node's TypeScript stripping is experimental, so the flag is
 required on Node 22.

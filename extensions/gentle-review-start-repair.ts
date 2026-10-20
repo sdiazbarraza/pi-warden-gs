@@ -8,7 +8,8 @@
 // (`validateNativeStartLensSelection`, extensions/gentle-ai.ts:6495) or `committed-only-required`
 // (gentle-ai.ts:9205-9207).
 //
-// What: a `tool_call` handler repairing only those three fields, in place, before the tool runs.
+// What: a `tool_call` handler restoring a relocated parameter envelope and repairing only those three
+// fields, in place, before the tool runs.
 // `event.input` is mutable and Pi performs no re-validation after mutation (`ToolCallEvent`, pi
 // dist/core/extensions/types.d.ts). A `tool_call` handler failure blocks the tool, so every path
 // below is caught and falls back to passing the call through unchanged.
@@ -16,7 +17,10 @@
 // Scope: `gentle_review` + `operation: "start"` + a parsed `input.mode === "ordinary"` only.
 // `operation`, `mode`, `baseRef`, `policyPath`, `focus`, `untrackedScope`,
 // `expectedUntrackedInventory`, `intendedUntracked` and a provider-issued `submission` binding are
-// never rewritten. A payload whose fields are already valid passes through byte-identical.
+// never rewritten inside a parsed `input`. A buggy serializer has also been observed to relocate the
+// tool's own parameters inside `input`, so the handler first restores that envelope (see
+// `repairEnvelope`) and only then runs the repair above. A payload whose fields are already valid
+// passes through byte-identical.
 // Debug: `GENTLE_AI_DEBUG_LENS_PATCH=1` prints every repair (or swallowed failure) to stderr.
 // Install: it ships inside the `pi-warden-gs` package and is registered in its `package.json`
 // (`pi.extensions`), so Pi loads `extensions/gentle-review-start-repair.ts` from this package at startup; `/reload`
@@ -176,12 +180,50 @@ function parseInputObject(value: unknown): Record<string, unknown> | undefined {
 	return isRecord(parsed) ? parsed : undefined;
 }
 
+/** The tool's own parameters, which a buggy serializer has been observed to relocate inside `input`. */
+const ENVELOPE_KEYS: readonly string[] = ["operation", "input", "baseRef", "committedOnly", "idempotencyKey", "workspaceRoot"];
+
+/**
+ * Moves recognised tool parameters that arrived nested inside `input` back to the top level, but only
+ * where the top-level slot is empty. Without this the handler never reaches its own repair, because
+ * `parameters.operation` is undefined, and the controller answers "operation: must have required
+ * properties operation" without ever seeing the call.
+ *
+ * A top level already carrying a string `operation` is the signature that nothing was relocated, so
+ * that call is left byte-identical. The relocated wrapper is the other shape: its own `input` slot
+ * holds the envelope rather than the START payload, so the nested `input` replaces it and the
+ * payload reaches the repair below.
+ */
+export function repairEnvelope(parameters: Record<string, unknown>): Record<string, unknown> | undefined {
+	if (typeof parameters.operation === "string") return undefined;
+	const nested = parseInputObject(parameters.input);
+	if (nested === undefined) return undefined;
+	let changed = false;
+	for (const key of ENVELOPE_KEYS) {
+		if (key === "input") {
+			if (nested.input === undefined) continue;
+			parameters.input = nested.input;
+			changed = true;
+			continue;
+		}
+		if (parameters[key] !== undefined) continue;
+		const value = nested[key];
+		if (value === undefined) continue;
+		if (typeof value !== "string" && typeof value !== "boolean") continue;
+		parameters[key] = value;
+		changed = true;
+	}
+	return changed ? parameters : undefined;
+}
+
 export default function gentleReviewLensRepair(pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event) => {
 		try {
 			if (event.toolName !== "gentle_review") return;
 			const parameters = event.input as unknown;
 			if (!isRecord(parameters)) return;
+			const hoisted = repairEnvelope(parameters);
+			if (hoisted !== undefined) debugLog(`hoisted relocated tool parameters back, operation=${JSON.stringify(parameters.operation)}`);
 			if (parameters.operation !== "start") return;
 			const parsed = parseInputObject(parameters.input);
 			if (parsed === undefined) return;
