@@ -1,6 +1,6 @@
 {
   "name": "pi-warden-gs",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "keywords": [
@@ -10,15 +10,13 @@
     "extensions": [
       "./extensions/safety-guard.ts",
       "./extensions/rtk.ts",
-      "./extensions/reply-length.ts",
-      "./extensions/gentle-review-start-repair.ts",
-      "./extensions/gentle-review-capture-guard.ts"
+      "./extensions/reply-length.ts"
     ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
-  "description": "Pi package with harness guards, gates and workarounds for Gentle AI workflows: reviewed-brief gate, destructive-command blocker, delivery gate, reply-length reminder and a gentle_review START repair.",
+  "description": "Pi package with harness guards and gates for Gentle AI workflows: reviewed-brief gate, destructive-command blocker, delivery gate and reply-length reminder. The provider-specific review workarounds live in pi-minimax-gs.",
   "author": "Sebasti\u00e1n D\u00edaz (https://github.com/sdiazbarraza)",
   "license": "MIT",
   "repository": {
