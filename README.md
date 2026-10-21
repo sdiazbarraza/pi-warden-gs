@@ -92,7 +92,7 @@ files are plain Pi extensions if you prefer to load them with `-e`.
 
 ```bash
 pi list                                  # the package appears
-node --experimental-strip-types --test tests/*.test.ts    # 94 tests, all passing
+node --experimental-strip-types --test tests/*.test.ts    # 73 tests, all passing
 chmod 755 hooks/brief-guard.sh           # only if you copied it by hand
 ```
 
@@ -137,7 +137,6 @@ export default function (pi: ExtensionAPI) {
 | `safety-guard.ts` | `tool_call` | Blocks destructive bash commands, blocks direct delivery commands outside `gentle-ai-publisher`, blocks heavy builds in the orchestrator, and gates writer dispatch on a reviewed brief | Fail-**closed** on writer dispatch (any guard error blocks), fail-open on the bash destructive check |
 | `brief-guard.sh` (hook) | Claude Code `PreToolUse`, and spawned by `safety-guard` | Checks the eight required brief sections, their order and the literal stop-and-report clause | Fail-open on parsing, exit 2 on a malformed brief |
 | `reply-length.ts` | `before_agent_start` | Adds one hidden reminder per user-started run of the main session: at most 5 lines of at most 25 words, outcome first, long content in a file | Cannot fail: it only appends a message |
-| `gentle-review-start-repair.ts` | `tool_call` | Repairs a `gentle_review` START whose `lenses`, `lensesReason` or `committedOnly` arrived mangled, so the call is not rejected as `lenses-invalid`; a call whose top-level parameters were relocated inside `input` has that envelope restored first | Fail-open: any internal error passes the call through unchanged |
 | `rtk.ts` | `tool_call` | Rewrites bash commands to use `rtk` for token savings | Leaves commands alone when it cannot rewrite them |
 
 A `tool_call` handler runs before the tool and may mutate `event.input`; Pi performs no validation
@@ -201,25 +200,18 @@ replaced, and the script can run repeatedly.
   session (never in subagents) to answer in at most 5 lines of at most 25 words each, one sentence
   per line, outcome first and long content in a file. The reminder is the single home of that
   policy; no `AGENTS.md` or `APPEND_SYSTEM.md` restates it.
-- `extensions/gentle-review-start-repair.ts`: workaround for
-  [gentle-shell#2280](https://github.com/Gentleman-Programming/gentle-shell/issues/2280). It repairs
-  a `gentle_review` START whose `lenses` arrived as a comma string, a JSON string, with duplicates
-  or non-canonical names; whose `lensesReason` carries a newline or more than 500 bytes; or whose
-  `committedOnly` arrived as `"true"`/`1` (and deletes it for the `"false"`/`0` shapes the contract
-  rejects). Its README documents the exact scope and the deliberate limitation. Delete the file once
-  the upstream fix lands.
-- `extensions/gentle-review-capture-guard.ts`: blocks a `gentle_review_capture` or
-  `gentle_review_capture_group` call whose `collectBinding` (or any item of `collectBindings`) is not
-  the exact string the provider issued. It names five causes: a top-level scalar that mixes a string
-  with a number or a boolean (what a rewritten binding looks like, since a provider collect input
-  carries every top-level scalar as a string); the same mix inside a serialized payload; a string
-  that is not valid JSON (a mangled string); a binding that arrives as an object instead of the
-  issued string; and a binding that is not a string at all. The block names the field, the key and
-  the value and asks for a verbatim re-copy. It never repairs, re-serializes or normalizes a
-  binding — the original value is not in the extension, so guessing one would only mint a second
-  wrong digest — and it fails open, passing through any call it cannot inspect. Set
-  `GENTLE_AI_DEBUG_BINDING_GUARD=1` for one stderr line per block.
 - `extensions/rtk.ts`: rtk integration for bash command rewriting.
+
+### Provider workarounds live in their own package
+
+The native-review workarounds moved to
+[pi-minimax-gs](https://github.com/sdiazbarraza/pi-minimax-gs): the `gentle_review` START repair
+(relocated envelope, mangled `lenses`/`lensesReason`/`committedOnly`) and the capture-binding
+tripwire both exist because of provider-side argument serialization observed with the MiniMax model
+family. They are local workarounds for
+[gentle-shell#2280](https://github.com/Gentleman-Programming/gentle-shell/issues/2280), not part of
+the general harness, so this package no longer ships them: install `pi-minimax-gs` alongside it if
+you review with that family, and drop it once the upstream defects land.
 
 ### Hooks, agents and configuration
 
@@ -259,10 +251,9 @@ replaced, and the script can run repeatedly.
 node --experimental-strip-types --test tests/*.test.ts
 ```
 
-All 94 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
-the structure checker as a real process, the reply-length reminder, the START repair, the capture
-binding tripwire (13 cases), the profile switcher and the installer. Node's TypeScript stripping is experimental, so the flag is
-required on Node 22.
+All 73 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
+the structure checker as a real process, the reply-length reminder, the profile switcher and the
+installer. Node's TypeScript stripping is experimental, so the flag is required on Node 22.
 
 ## Uninstall
 
