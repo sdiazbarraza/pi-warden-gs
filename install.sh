@@ -91,6 +91,85 @@ else
 fi
 place "$PKG_DIR/hooks/brief-guard.sh" "$CLAUDE_HOME/hooks/brief-guard.sh"
 chmod 755 "$CLAUDE_HOME/hooks/brief-guard.sh"
+
+# --- Claude Code: the same guards, the same global prompt, the same subagents.
+# Every file is deployed with a backup and the settings entries are added only when they are
+# missing, so running this script again changes nothing.
+CLAUDE_HOOKS_SRC="$PKG_DIR/claude/hooks"
+CLAUDE_AGENTS_SRC="$PKG_DIR/claude/agents"
+CLAUDE_MODEL_OVERRIDE="${CLAUDE_WARDEN_MODEL:-}"
+APPEND_MARKER="<!-- pi-warden-gs:append-system -->"
+APPEND_END="<!-- /pi-warden-gs:append-system -->"
+
+place_tree() {
+  local src_dir="$1" dst_dir="$2" src
+  [ -d "$src_dir" ] || return 0
+  mkdir -p "$dst_dir"
+  for src in "$src_dir"/*.mjs; do
+    [ -e "$src" ] || continue
+    place "$src" "$dst_dir/$(basename "$src")"
+  done
+}
+
+if [ -d "$CLAUDE_HOOKS_SRC" ]; then
+  place_tree "$CLAUDE_HOOKS_SRC" "$CLAUDE_HOME/hooks"
+  place_tree "$CLAUDE_HOOKS_SRC/lib" "$CLAUDE_HOME/hooks/lib"
+fi
+
+# A model the user already chose wins over the packaged default, exactly as on the Pi side.
+for agent in "$CLAUDE_AGENTS_SRC"/*.md; do
+  [ -e "$agent" ] || continue
+  name="$(basename "$agent")"
+  dst="$CLAUDE_HOME/agents/$name"
+  model=""
+  if [ -n "$CLAUDE_MODEL_OVERRIDE" ]; then
+    model="$CLAUDE_MODEL_OVERRIDE"
+  elif [ -f "$dst" ]; then
+    chosen="$(sed -n 's/^model:[[:space:]]*//p' "$dst" | head -n 1)"
+    if [ -n "$chosen" ] && [ "$chosen" != "inherit" ]; then model="$chosen"; fi
+  fi
+  src="$agent"
+  if [ -n "$model" ]; then
+    src="$WORK_DIR/$name"
+    awk -v m="$model" '!done && /^model:/ { print "model: " m; done = 1; next } { print }' "$agent" > "$src"
+  fi
+  place "$src" "$dst"
+done
+
+# The global prompt lives in its own file and is included from CLAUDE.md, so the harness that
+# composes CLAUDE.md never rewrites the prompt itself.
+ensure_append_import() {
+  local md="$CLAUDE_HOME/CLAUDE.md" import_line="@$CLAUDE_HOME/APPEND_SYSTEM.md" tmp
+  mkdir -p "$CLAUDE_HOME"
+  [ -f "$md" ] || : > "$md"
+  if grep -qF "$APPEND_MARKER" "$md"; then
+    tmp="$(mktemp "$md.XXXXXX")"
+    awk -v s="$APPEND_MARKER" -v e="$APPEND_END" -v i="$import_line" '
+      $0 == s { print s; print i; skip = 1; next }
+      skip && $0 == e { print e; skip = 0; next }
+      skip { next }
+      { print }' "$md" > "$tmp"
+    chmod --reference="$md" "$tmp" 2>/dev/null || true
+    if cmp -s "$tmp" "$md"; then
+      rm -f "$tmp"
+      echo "unchanged $md"
+    else
+      cp -p "$md" "$md.bak-$STAMP"
+      mv "$tmp" "$md"
+      echo "updated $md (backup: $md.bak-$STAMP)"
+    fi
+  else
+    cp -p "$md" "$md.bak-$STAMP"
+    printf '\n%s\n%s\n%s\n' "$APPEND_MARKER" "$import_line" "$APPEND_END" >> "$md"
+    echo "updated $md (backup: $md.bak-$STAMP)"
+  fi
+}
+
+if [ -f "$PKG_DIR/claude/APPEND_SYSTEM.md" ]; then
+  place "$PKG_DIR/claude/APPEND_SYSTEM.md" "$CLAUDE_HOME/APPEND_SYSTEM.md"
+  ensure_append_import
+fi
+
 place "$PKG_DIR/bin/pi-perfil" "$HOME/bin/pi-perfil"
 chmod 755 "$HOME/bin/pi-perfil"
 for profile in "$PKG_DIR"/pi/profiles/*.json; do
@@ -123,14 +202,14 @@ update_json "$PI_HOME/settings.json" '
 # Adds the MiniMax M3.1 preview model used by plan-minimax-m3; keeps every other entry and key.
 update_json "$PI_HOME/models.json" "$(cat "$PKG_DIR/pi/models-minimax.jq")"
 
-update_json "$CLAUDE_HOME/settings.json" '
-  if any(.hooks.PreToolUse[]?.hooks[]?; (.command // "") | contains("brief-guard.sh")) then .
-  else .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [{
-    "matcher": "Agent",
-    "hooks": [{"type": "command", "command": "~/.claude/hooks/brief-guard.sh", "timeout": 10}]
-  }])
-  end'
+if [ -f "$PKG_DIR/claude/claude-settings.jq" ]; then
+  update_json "$CLAUDE_HOME/settings.json" "$(cat "$PKG_DIR/claude/claude-settings.jq")"
+fi
 
 "${REGISTER[@]}" "$PKG_DIR"
 echo "registered package $PKG_DIR"
 echo "Keep $PKG_DIR in place: pi loads the extensions from it. Restart open pi sessions to apply the changes."
+if [ -d "$CLAUDE_HOOKS_SRC" ]; then
+  echo "Claude Code guards installed in $CLAUDE_HOME/hooks and registered in $CLAUDE_HOME/settings.json."
+  echo "Restart Claude Code to apply them; the global prompt is included from $CLAUDE_HOME/CLAUDE.md."
+fi
