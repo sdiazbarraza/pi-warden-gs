@@ -22,6 +22,7 @@ if [ "${BRIEF_GUARD_FORCE_STRUCTURE:-}" != 1 ]; then
 fi
 
 brief=$(jq -r '.tool_input.prompt // empty' <<<"$input" 2>/dev/null) || exit 0
+brief=$(printf '%s' "$brief" | tr -d '\r')
 bytes=$(printf '%s' "$brief" | wc -c | tr -d '[:space:]') || exit 0
 
 problems=$(printf '%s' "$brief" | awk -v bytes="$bytes" '
@@ -95,16 +96,21 @@ END {
     else if (line == ".") bad = 1
     else if (line ~ /^`.*`$/) {
       inner = substr(line, 2, length(line) - 2)
-      if (inner == "" || inner == "." || inner ~ /^\//) bad = 1
+      if (inner == "" || inner == "." || inner ~ /^\// || inner ~ /\.\./ || inner ~ /\*\*/) bad = 1
     } else if (line ~ /[[:space:]]/ || line ~ /^\//) bad = 1
+    if (line ~ /\.\./ || line ~ /\*\*/) bad = 1
     if (bad)
       print "- \"## Allowed edit surfaces\" line is not a repository-relative path or narrow glob"
   }
-  if (ver ~ /export[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=\$\(/ || ver ~ /\|[ \t]*while[ \t]+read/)
+  if (ver ~ /export[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=.*\$\(/ || ver ~ /\|[ \t]*while[ \t]+read/)
     print "- \"## Verification\" must not hide failures with export VAR=$( or | while read"
   packed = raw
   gsub(/[ \t]+/, " ", packed)
-  if (packed ~ /git( -[Cc] [^ \n]+| --[^ \n]+)* push/ || packed ~ /gh( -R [^ \n]+| --repo [^ \n]+)* pr (create|merge|edit)/ || raw ~ /\.env/)
+  envcheck = raw
+  gsub(/\.env\.example/, "", envcheck)
+  if (packed ~ /(^|[^A-Za-z0-9_-])git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)/ || \
+      packed ~ /(^|[^A-Za-z0-9_-])gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)/ || \
+      envcheck ~ /\.env/)
     print "- brief must not contain git push, gh pr create|merge|edit, or .env file reads"
 }') || exit 0
 

@@ -87,6 +87,48 @@ test("accepts Preconditions that label branch\/HEAD with capitals", () => {
   assert.equal(run(brief, FORCE, emptyRepo()).status, 0)
 })
 
+test("rejects edit surfaces with traversal or broad globs", () => {
+  for (const surf of ["../outside.txt", "**", "src/../a.ts"]) {
+    const result = run(VALID.replace("hooks/brief-guard.sh", surf), FORCE, emptyRepo())
+    assert.equal(result.status, 2, surf)
+    assert.match(result.stderr, /not a repository-relative path or narrow glob/)
+  }
+})
+
+test("rejects git -c forms of push", () => {
+  const result = run(VALID.replace("one line", "then git -c core.hooksPath=/tmp push origin main"), FORCE, emptyRepo())
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /must not contain git push/)
+})
+
+test("rejects quoted export command substitution in Verification", () => {
+  const brief = VALID.replace(
+    "node --test tests/brief-guard-script.test.ts",
+    "export OUT=\"$(node --test tests/brief-guard-script.test.ts)\"",
+  )
+  const result = run(brief, FORCE, emptyRepo())
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /must not hide failures/)
+})
+
+test("allows .env.example and rejects .env.local reads", () => {
+  const ok = run(VALID.replace("one line", "copy .env.example"), FORCE, emptyRepo())
+  assert.equal(ok.status, 0, ok.stderr)
+  const bad = run(VALID.replace("one line", "cat .env.local"), FORCE, emptyRepo())
+  assert.equal(bad.status, 2)
+  assert.match(bad.stderr, /\.env file reads/)
+})
+
+test("measures size on LF-normalized bytes", () => {
+  const core = VALID.replace(/\n$/, "")
+  const base = Buffer.byteLength(core, "utf8")
+  const under = core.replace("add the flag", "add the flag" + "x".repeat(3071 - base))
+  const at = core.replace("add the flag", "add the flag" + "x".repeat(3072 - base))
+  assert.equal(run(under, FORCE, emptyRepo()).status, 0, "under 3072 passes")
+  assert.equal(run(at, FORCE, emptyRepo()).status, 2, "3072 bytes rejected")
+  assert.equal(run(at.replace(/\n/g, "\r\n"), FORCE, emptyRepo()).status, 2, "CRLF keeps the size verdict")
+})
+
 test("keeps the repository trigger when no caller forces the check", () => {
   const cwd = emptyRepo()
   const malformed = "## Objective\nonly one heading\n"
