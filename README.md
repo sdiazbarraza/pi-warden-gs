@@ -17,6 +17,9 @@ session.
 - Pi (`pi` CLI). Most extensions assume [gentle-pi](https://www.npmjs.com/package/gentle-pi) and its
   `gentle-ai-*` subagents; `safety-guard.ts` and `brief-guard.sh` are the only pieces that depend on
   them.
+- Claude Code, for the Claude Code side of the package (see [Claude Code](#claude-code)). That side
+  needs Node >= 22 in `PATH` to run the hooks and `jq` for the brief guard; it does not need Pi or
+  gentle-pi.
 - `bash`, `jq` and `git` for `hooks/brief-guard.sh` and `install.sh`.
 - Node >= 22 only to run the tests.
 - `install.sh` and `bin/pi-perfil` read the target home from `gentle-shell home`: `link` uses
@@ -60,12 +63,15 @@ cd pi-warden-gs
    `~/.pi/gentle-ai/profiles/`.
 3. Installs `hooks/brief-guard.sh` as the Claude Code `PreToolUse` hook in
    `~/.claude/hooks/` and registers it in `~/.claude/settings.json`.
-4. Moves previously loose `safety-guard.ts`, `rtk.ts` and `minimax-review-binding.ts` out of
+4. Installs the Claude Code side: the four hooks in `~/.claude/hooks/`, the five subagents in
+   `~/.claude/agents/`, the global prompt in `~/.claude/APPEND_SYSTEM.md` included from
+   `~/.claude/CLAUDE.md`, and the hook registrations in `~/.claude/settings.json`.
+5. Moves previously loose `safety-guard.ts`, `rtk.ts` and `minimax-review-binding.ts` out of
    `<agent-dir>/extensions` into `extensions-backup-<stamp>/`, so a stale copy cannot load twice.
-5. Disables the `builtin:mcp` and `builtin:codemode` extensions in `<agent-dir>/settings.json`.
-6. Registers this directory as a Pi package (`gentle-shell install <dir>`, or `pi install <dir>`
+6. Disables the `builtin:mcp` and `builtin:codemode` extensions in `<agent-dir>/settings.json`.
+7. Registers this directory as a Pi package (`gentle-shell install <dir>`, or `pi install <dir>`
    without gentle-shell).
-7. Backs up every file it would overwrite to `*.bak-<stamp>` and keeps the originals otherwise.
+8. Backs up every file it would overwrite to `*.bak-<stamp>` and keeps the originals otherwise.
 
 Keep the cloned directory in place: Pi loads the extensions from it, and `/reload` (or a new
 session) activates changes in an open session.
@@ -97,6 +103,85 @@ chmod 755 hooks/brief-guard.sh           # only if you copied it by hand
 ```
 
 In an open Pi session, run `/reload` after installing or updating the package.
+
+## Claude Code
+
+The same guard layer, the same five subagents and the same global prompt are available for Claude
+Code. The Pi extensions and the Claude Code hooks are two implementations of one contract, kept in
+step by a differential test that runs the same command corpus through both and requires identical
+labels.
+
+| Pi | Claude Code |
+| --- | --- |
+| `extensions/safety-guard.ts` (`tool_call`) | `claude/hooks/safety-guard.mjs` (`PreToolUse` on `Bash` and `Agent`) |
+| `extensions/reply-length.ts` (`before_agent_start`) | `claude/hooks/reply-length.mjs` (`UserPromptSubmit`) |
+| `extensions/rtk.ts` (`tool_call`) | `claude/hooks/rtk.mjs` (`PreToolUse` on `Bash`) |
+| approvals in Pi session entries | approvals in `~/.claude/.warden/approvals.json` |
+| `pi/APPEND_SYSTEM.md` | `claude/APPEND_SYSTEM.md`, included from `~/.claude/CLAUDE.md` |
+| `pi/agents/*.md` | `claude/agents/*.md` → `~/.claude/agents/` |
+| `hooks/brief-guard.sh` | the same script, already shared |
+
+### What the Claude Code hooks do
+
+| Hook | Event | What it does |
+| --- | --- | --- |
+| `safety-guard.mjs` | `PreToolUse` (`Bash`) | Blocks destructive commands, delivery commands outside the publisher, and heavy builds or container runs outside a subagent |
+| `safety-guard.mjs` | `PreToolUse` (`Agent`) | The reviewed-brief gate: a writer launch needs an approved brief and a brief that passes `brief-guard.sh` |
+| `brief-approval.mjs` | `PostToolUse` (`Agent`) | Registers the sha256 of a brief the reviewer approved |
+| `reply-length.mjs` | `UserPromptSubmit` | Adds the reply-length reminder, in the main session only |
+| `rtk.mjs` | `PreToolUse` (`Bash`) | Rewrites the command through `rtk rewrite` |
+
+Claude Code has no session-entry API for hooks, so the approvals live in a file:
+`~/.claude/.warden/approvals.json` (override the directory with `CLAUDE_WARDEN_STATE_DIR`). The
+approvals are scoped to the session that granted them, are single-use, and the write is atomic.
+
+### How the Claude Code side detects a subagent
+
+Pi recognizes a child agent through `GENTLE_PI_AGENTS_CHILD`. Claude Code writes a subagent's
+transcript next to a `.meta.json` sibling that names the agent:
+
+```
+~/.claude/projects/<slug>/subagents/agent-<id>.jsonl
+~/.claude/projects/<slug>/subagents/agent-<id>.meta.json   -> {"agentType":"gentle-ai-publisher",...}
+```
+
+The main session has no such sibling. The hooks read `agentType` from it: the heavy-build gate
+applies only in the main session, and the delivery gate allows `git push` and `gh pr` only inside
+the `gentle-ai-publisher` subagent.
+
+### The global prompt
+
+`claude/APPEND_SYSTEM.md` is installed as `~/.claude/APPEND_SYSTEM.md` and included from
+`~/.claude/CLAUDE.md`:
+
+```markdown
+<!-- pi-warden-gs:append-system -->
+@/home/<user>/.claude/APPEND_SYSTEM.md
+<!-- /pi-warden-gs:append-system -->
+```
+
+The prompt lives in its own file so a harness that composes `CLAUDE.md` never rewrites it, and the
+installer re-adds the inclusion if the file is replaced. Re-running `install.sh` is always safe.
+
+### Installing the Claude Code side
+
+`install.sh` deploys it together with the Pi side. The Claude subagents ship `model: inherit`; a
+`model:` you edited yourself is kept. To set one model for all of them:
+
+```bash
+CLAUDE_WARDEN_MODEL=sonnet ./install.sh
+```
+
+### Verify the Claude Code installation
+
+```bash
+ls ~/.claude/hooks/                       # safety-guard.mjs, brief-approval.mjs, reply-length.mjs, rtk.mjs
+ls ~/.claude/agents/gentle-ai-*.md        # the five subagents
+grep -c "pi-warden-gs:append-system" ~/.claude/CLAUDE.md
+jq '.hooks.PreToolUse' ~/.claude/settings.json
+```
+
+Restart Claude Code after installing: the hooks of a session are read when it starts.
 
 ## How the package works
 
@@ -180,6 +265,10 @@ reviewed again.
 | `pi/models-minimax.jq` | — | Used only to add a missing model to `models.json` |
 | `bin/pi-perfil` | `~/bin/pi-perfil` | Profile switcher, needs `jq` |
 | `hooks/brief-guard.sh` | `~/.claude/hooks/brief-guard.sh` | Shared with Claude Code |
+| `claude/hooks/*.mjs` | `~/.claude/hooks/` | The Claude Code guards, registered in `~/.claude/settings.json` |
+| `claude/hooks/lib/*.mjs` | `~/.claude/hooks/lib/` | The approval store and the subagent detection |
+| `claude/agents/*.md` | `~/.claude/agents/` | The same five subagents, `model:` ships as `inherit`, and a `model:` you edited is kept |
+| `claude/APPEND_SYSTEM.md` | `~/.claude/APPEND_SYSTEM.md` | Included from `~/.claude/CLAUDE.md` |
 | `extensions/*.ts` | *(nobody)* | Loaded in place from this package |
 
 Anything already installed with different content is backed up as `*.bak-<stamp>` before it is
@@ -260,11 +349,14 @@ installer. Node's TypeScript stripping is experimental, so the flag is required 
 ```bash
 pi remove git:github.com/sdiazbarraza/pi-warden-gs   # or the source you installed
 rm -f <agent-dir>/APPEND_SYSTEM.md <agent-dir>/agents/gentle-ai-*.md ~/bin/pi-perfil
-rm -f ~/.claude/hooks/brief-guard.sh
+rm -f ~/.claude/hooks/brief-guard.sh ~/.claude/hooks/*.mjs
+rm -rf ~/.claude/hooks/lib ~/.claude/.warden
+rm -f ~/.claude/agents/gentle-ai-*.md ~/.claude/APPEND_SYSTEM.md
 ```
 
-Remove the `brief-guard.sh` entry from `~/.claude/settings.json`, and restore any `*.bak-<stamp>` or
-`extensions-backup-<stamp>/` files you want back.
+Remove the `brief-guard.sh` entry from `~/.claude/settings.json` and the `pi-warden-gs:append-system`
+block from `~/.claude/CLAUDE.md`, and restore any `*.bak-<stamp>` or `extensions-backup-<stamp>/` files
+you want back.
 
 ## Excluded
 
