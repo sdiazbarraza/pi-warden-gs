@@ -22,10 +22,20 @@ if [ "${BRIEF_GUARD_FORCE_STRUCTURE:-}" != 1 ]; then
 fi
 
 brief=$(jq -r '.tool_input.prompt // empty' <<<"$input" 2>/dev/null) || exit 0
-brief=$(printf '%s' "$brief" | tr -d '\r')
-bytes=$(printf '%s' "$brief" | wc -c | tr -d '[:space:]') || exit 0
+# Count the exact bytes of the prompt without command substitution stripping
+# trailing newlines: `jq -j` emits no added newline, so `wc -c` is exact.
+bytes=$(jq -j '.tool_input.prompt // empty' <<<"$input" 2>/dev/null | wc -c | tr -d '[:space:]') || exit 0
 
 problems=$(printf '%s' "$brief" | awk -v bytes="$bytes" '
+function isread(line,   t) {
+  t = line
+  sub(/^[[:space:]]+/, "", t)
+  if (t ~ /^[.][[:space:]]/) return 1
+  if (t ~ /^[[:space:]]*(cat|source|grep|egrep|fgrep|sed|awk|perl|python3?|node|bash|sh|zsh|cp|mv|ln|less|more|head|tail|read|jq|diff|cmp|sort|uniq|wc|tee|cut|tr|env|dotenv|export|realpath|stat)[[:space:]]/) return 1
+  if (t ~ /<[[:space:]]*\.env/) return 1
+  if (t ~ /--env-file([ =])?\.env/) return 1
+  return 0
+}
 BEGIN {
   list = "Objective|Preconditions|Steps|Allowed edit surfaces|Verification|Acceptance criteria|Architecture constraints|Report"
   n = split(list, req, "|")
@@ -33,6 +43,14 @@ BEGIN {
 }
 {
   raw = raw $0 "\n"
+  cmd = $0
+  sub(/^[[:space:]]+/, "", cmd)
+  sub(/[[:space:]]+$/, "", cmd)
+  gsub(/[ \t]+/, " ", cmd)
+  neg = cmd ~ /(^|[^A-Za-z0-9_])(do[[:space:]]+not|must[[:space:]]+not|never|avoid|without|should[[:space:]]+not)[[:space:]]/
+  if (!neg && cmd ~ /(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)/) delivery = 1
+  if (!neg && cmd ~ /(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)/) delivery = 1
+  if (!neg && isread(cmd) && cmd ~ /\.env([^A-Za-z0-9_]|$)/ && cmd !~ /\.env\.example([[:space:]\/"`]|$)/) envread = 1
 }
 /^[[:space:]]*(```|~~~)/ {
   fence = !fence
@@ -104,13 +122,7 @@ END {
   }
   if (ver ~ /export[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=.*\$\(/ || ver ~ /\|[ \t]*while[ \t]+read/)
     print "- \"## Verification\" must not hide failures with export VAR=$( or | while read"
-  packed = raw
-  gsub(/[ \t]+/, " ", packed)
-  envcheck = raw
-  gsub(/\.env\.example/, "", envcheck)
-  if (packed ~ /(^|[^A-Za-z0-9_-])git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)/ || \
-      packed ~ /(^|[^A-Za-z0-9_-])gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)/ || \
-      envcheck ~ /\.env/)
+  if (delivery || envread)
     print "- brief must not contain git push, gh pr create|merge|edit, or .env file reads"
 }') || exit 0
 

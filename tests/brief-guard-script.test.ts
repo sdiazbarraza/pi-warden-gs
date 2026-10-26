@@ -112,11 +112,29 @@ test("rejects quoted export command substitution in Verification", () => {
 })
 
 test("allows .env.example and rejects .env.local reads", () => {
-  const ok = run(VALID.replace("one line", "copy .env.example"), FORCE, emptyRepo())
+  const ok = run(VALID.replace("one line", "cat .env.example"), FORCE, emptyRepo())
   assert.equal(ok.status, 0, ok.stderr)
   const bad = run(VALID.replace("one line", "cat .env.local"), FORCE, emptyRepo())
   assert.equal(bad.status, 2)
   assert.match(bad.stderr, /\.env file reads/)
+})
+
+test("flags .env.example.local reads", () => {
+  const bad = run(VALID.replace("one line", "cat .env.example.local"), FORCE, emptyRepo())
+  assert.equal(bad.status, 2)
+  assert.match(bad.stderr, /\.env file reads/)
+})
+
+test("allows prose mentions of env files and unrelated .environment", () => {
+  const ok1 = run(VALID.replace("one line", "must not read .env"), FORCE, emptyRepo())
+  assert.equal(ok1.status, 0, ok1.stderr)
+  const ok2 = run(VALID.replace("one line", "update .environment config"), FORCE, emptyRepo())
+  assert.equal(ok2.status, 0, ok2.stderr)
+})
+
+test("allows prose delivery mentions", () => {
+  const ok = run(VALID.replace("one line", "do not run git push"), FORCE, emptyRepo())
+  assert.equal(ok.status, 0, ok.stderr)
 })
 
 test("measures size on LF-normalized bytes", () => {
@@ -127,6 +145,13 @@ test("measures size on LF-normalized bytes", () => {
   assert.equal(run(under, FORCE, emptyRepo()).status, 0, "under 3072 passes")
   assert.equal(run(at, FORCE, emptyRepo()).status, 2, "3072 bytes rejected")
   assert.equal(run(at.replace(/\n/g, "\r\n"), FORCE, emptyRepo()).status, 2, "CRLF keeps the size verdict")
+})
+
+test("rejects a 3072-byte brief that ends in a newline", () => {
+  const base = Buffer.byteLength(VALID, "utf8")
+  const brief = VALID.replace("add the flag", "add the flag" + "x".repeat(3072 - base))
+  assert.equal(Buffer.byteLength(brief, "utf8"), 3072)
+  assert.equal(run(brief, FORCE, emptyRepo()).status, 2, "trailing newline must not lower the size")
 })
 
 test("keeps the repository trigger when no caller forces the check", () => {
