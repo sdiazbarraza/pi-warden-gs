@@ -22,9 +22,11 @@ if [ "${BRIEF_GUARD_FORCE_STRUCTURE:-}" != 1 ]; then
 fi
 
 brief=$(jq -r '.tool_input.prompt // empty' <<<"$input" 2>/dev/null) || exit 0
-# Count the exact bytes of the prompt without command substitution stripping
-# trailing newlines: `jq -j` emits no added newline, so `wc -c` is exact.
-bytes=$(jq -j '.tool_input.prompt // empty' <<<"$input" 2>/dev/null | wc -c | tr -d '[:space:]') || exit 0
+brief=$(printf '%s' "$brief" | tr -d '\r')
+# Count the exact LF-normalized bytes of the prompt without command substitution stripping
+# trailing newlines: `jq -j` emits no added newline, `tr -d '\r'` normalizes CRLF, so `wc -c`
+# counts exact LF bytes including any trailing newline.
+bytes=$(jq -j '.tool_input.prompt // empty' <<<"$input" 2>/dev/null | tr -d '\r' | wc -c | tr -d '[:space:]') || exit 0
 
 problems=$(printf '%s' "$brief" | awk -v bytes="$bytes" '
 function isread(line,   t) {
@@ -48,9 +50,10 @@ BEGIN {
   sub(/[[:space:]]+$/, "", cmd)
   gsub(/[ \t]+/, " ", cmd)
   neg = cmd ~ /(^|[^A-Za-z0-9_])(do[[:space:]]+not|must[[:space:]]+not|never|avoid|without|should[[:space:]]+not)[[:space:]]/
+  if (cmd ~ /(is|are|was|were|being|must|should|shall)[[:space:]]+(not[[:space:]]+)?(forbidden|prohibited|blocked|disallowed|not[[:space:]]+allowed)/) neg = 1
   if (!neg && cmd ~ /(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)/) delivery = 1
   if (!neg && cmd ~ /(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)/) delivery = 1
-  if (!neg && isread(cmd) && cmd ~ /\.env([^A-Za-z0-9_]|$)/ && cmd !~ /\.env\.example([[:space:]\/"`]|$)/) envread = 1
+  if (!neg && isread(cmd) && cmd ~ /\.env([^A-Za-z0-9_]|$)/ && cmd !~ /(^|[^A-Za-z0-9_])\.env\.example([[:space:]\/"`]|$)/) envread = 1
 }
 /^[[:space:]]*(```|~~~)/ {
   fence = !fence

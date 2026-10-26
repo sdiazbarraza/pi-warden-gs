@@ -125,6 +125,12 @@ test("flags .env.example.local reads", () => {
   assert.match(bad.stderr, /\.env file reads/)
 })
 
+test("flags non-exact env names like backup.env.example", () => {
+  const bad = run(VALID.replace("one line", "cat backup.env.example"), FORCE, emptyRepo())
+  assert.equal(bad.status, 2)
+  assert.match(bad.stderr, /\.env file reads/)
+})
+
 test("allows prose mentions of env files and unrelated .environment", () => {
   const ok1 = run(VALID.replace("one line", "must not read .env"), FORCE, emptyRepo())
   assert.equal(ok1.status, 0, ok1.stderr)
@@ -135,6 +141,8 @@ test("allows prose mentions of env files and unrelated .environment", () => {
 test("allows prose delivery mentions", () => {
   const ok = run(VALID.replace("one line", "do not run git push"), FORCE, emptyRepo())
   assert.equal(ok.status, 0, ok.stderr)
+  const ok2 = run(VALID.replace("one line", "git push is forbidden"), FORCE, emptyRepo())
+  assert.equal(ok2.status, 0, ok2.stderr)
 })
 
 test("measures size on LF-normalized bytes", () => {
