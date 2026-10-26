@@ -21,11 +21,17 @@ if [ "${BRIEF_GUARD_FORCE_STRUCTURE:-}" != 1 ]; then
   grep -qF '### Brief del subagente' "$root/AGENTS.md" 2>/dev/null || exit 0
 fi
 
-problems=$(jq -r '.tool_input.prompt // empty' <<<"$input" | awk '
+brief=$(jq -r '.tool_input.prompt // empty' <<<"$input" 2>/dev/null) || exit 0
+bytes=$(printf '%s' "$brief" | wc -c | tr -d '[:space:]') || exit 0
+
+problems=$(printf '%s' "$brief" | awk -v bytes="$bytes" '
 BEGIN {
   list = "Objective|Preconditions|Steps|Allowed edit surfaces|Verification|Acceptance criteria|Architecture constraints|Report"
   n = split(list, req, "|")
   for (i = 1; i <= n; i++) idx[req[i]] = i
+}
+{
+  raw = raw $0 "\n"
 }
 /^[[:space:]]*(```|~~~)/ {
   fence = !fence
@@ -38,8 +44,27 @@ BEGIN {
   next
 }
 !fence && /^# / { cur = ""; next }
-cur != "" && /[^[:space:]]/ { body[cur]++; if (cur == "Steps") last = $0 }
+cur != "" && /[^[:space:]]/ {
+  body[cur]++
+  if (cur == "Steps") {
+    last = $0
+    line = $0
+    sub(/^[[:space:]]+/, "", line)
+    sub(/[[:space:]]+$/, "", line)
+    if (first_steps == "") first_steps = line
+    if (index(line, "Strict TDD is active.") > 0) tdd = 1
+    low = tolower(line)
+    if (low ~ /(^|[^a-z0-9_])preferred([^a-z0-9_]|$)/) weasel = 1
+    if (low ~ /(^|[^a-z0-9_])may([^a-z0-9_]|$)/) weasel = 1
+    if (index(low, "if possible") > 0) weasel = 1
+  }
+  if (cur == "Preconditions") pre = pre $0 "\n"
+  if (cur == "Allowed edit surfaces") surf[++ns] = $0
+  if (cur == "Verification") ver = ver $0 "\n"
+}
 END {
+  if (bytes + 0 >= 3072)
+    print "- brief must be smaller than 3072 bytes"
   for (i = 1; i <= n; i++) {
     h = req[i]
     if (!(h in seen)) printf "- missing section \"## %s\"\n", h
@@ -53,6 +78,31 @@ END {
   }
   if (("Steps" in seen) && last !~ /stop and report it/)
     print "- \"## Steps\" must end with: If a step fails for a reason this brief does not cover, stop and report it; never change the planned design on your own."
+  if (tdd && first_steps != "Strict TDD is active.")
+    print "- \"## Steps\" must start with: Strict TDD is active."
+  if (weasel)
+    print "- \"## Steps\" must not contain \"preferred\", \"may\", or \"if possible\""
+  if (("Preconditions" in seen) && body["Preconditions"] && (pre !~ /branch/ || pre !~ /HEAD/ || pre !~ /git status --short/))
+    print "- \"## Preconditions\" must reference the expected branch, HEAD, and git status --short"
+  for (i = 1; i <= ns; i++) {
+    line = surf[i]
+    sub(/^[[:space:]]+/, "", line)
+    sub(/[[:space:]]+$/, "", line)
+    if (line == "") continue
+    bad = 0
+    if (line ~ /^-[[:space:]]/) bad = 1
+    else if (line == ".") bad = 1
+    else if (line ~ /^`.*`$/) {
+      inner = substr(line, 2, length(line) - 2)
+      if (inner == "" || inner == "." || inner ~ /^\//) bad = 1
+    } else if (line ~ /[[:space:]]/ || line ~ /^\//) bad = 1
+    if (bad)
+      print "- \"## Allowed edit surfaces\" line is not a repository-relative path or narrow glob"
+  }
+  if (ver ~ /export[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=\$\(/ || ver ~ /\|[ \t]*while[ \t]+read/)
+    print "- \"## Verification\" must not hide failures with export VAR=$( or | while read"
+  if (raw ~ /git push/ || raw ~ /gh pr create/ || raw ~ /gh pr merge/ || raw ~ /gh pr edit/ || raw ~ /\.env/)
+    print "- brief must not contain git push, gh pr create|merge|edit, or .env file reads"
 }') || exit 0
 
 [ -z "$problems" ] && exit 0

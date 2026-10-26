@@ -75,14 +75,21 @@ gentle-pi. Project rules belong in each project's AGENTS.md.
   plus the worktree, the issue number, the human's requested corrections
   and, if any, the current `refined-request/<feature-name>` observation ID.
   Never write the brief to a file.
-- Before requesting review, self-check the brief: required headings in
+- `hooks/brief-guard.sh` (also spawned before `gentle-ai-brief-review` and
+  at writer launch) enforces, locally and offline: the eight headings in
   order and non-empty; `## Steps` ends with the stop-and-report clause;
-  under 3 KB; acceptance criteria copied verbatim (only those verified);
-  every verification command has an expected result and can fail; no command
-  hides a failure (for example `export VAR=$(cmd)` under `set -e`); no
-  secrets, environment-file reads, destructive or unauthorized delivery
-  commands; a behavior change carries the strict TDD line and RED step
-  (see "Brief content").
+  brief size under 3072 bytes; if `Strict TDD is active.` appears it is the
+  first non-empty `## Steps` line; `## Steps` has no whole words `preferred`,
+  `may`, or the phrase `if possible`; `## Preconditions` names the expected
+  branch, `HEAD`, and `git status --short`; `## Allowed edit surfaces` lines
+  are repository-relative paths or narrow globs (no bullets, `.`, absolute
+  paths, or unquoted spaces); `## Verification` has no `export VAR=$(` or
+  `| while read`; the brief has no `git push`, `gh pr create|merge|edit`, or
+  `.env` reads. Fail-open on parse. The reviewer judges the rest: acceptance
+  criteria copied verbatim, whether checks can fail, and whether the plan is
+  the right work. A small-fix brief starting with
+  `<!-- review: skipped (small fix) -->` skips the model review and still
+  runs these instant checks.
 - The text between the markers must be byte-identical to the later launch's
   `task` (plus `context`, joined by one blank line). safety-guard hashes
   both and blocks any launch whose exact brief was not approved. Approvals

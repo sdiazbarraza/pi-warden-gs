@@ -11,7 +11,7 @@ const VALID = `## Objective
 add the flag
 
 ## Preconditions
-repo clean
+On expected branch feat/example; HEAD is that tip; tree is clean (git status --short).
 
 ## Steps
 1. edit the guard

@@ -184,6 +184,18 @@ export function isSmallFixExempt(agent, brief) {
   return normalizeBrief(brief).split("\n")[0] === SKIP_MARKER
 }
 
+/** Writer named outside <<<BRIEF / BRIEF>>> in a reviewer task; default gentle-ai-worker. */
+export function writerAgentOfReviewTask(task) {
+  const lines = String(task ?? "").replace(/\r\n/g, "\n").split("\n")
+  const start = lines.indexOf("<<<BRIEF")
+  const end = lines.indexOf("BRIEF>>>")
+  const outer =
+    start >= 0 && end > start ? [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n") : String(task ?? "")
+  if (/\bgentle-ai-worker-infra\b/.test(outer)) return "gentle-ai-worker-infra"
+  if (/\bgentle-ai-worker\b/.test(outer)) return "gentle-ai-worker"
+  return "gentle-ai-worker"
+}
+
 function resolveBriefGuard() {
   const override = (process.env.CLAUDE_WARDEN_BRIEF_GUARD ?? "").trim()
   if (override) return override
@@ -312,6 +324,12 @@ function handleAgent(payload) {
       deny(VERDICT_IN_BRIEF)
       return
     }
+    const cwd = text(payload?.cwd) || process.cwd()
+    const rejection = briefRejection(writerAgentOfReviewTask(text(input.prompt)), marked, cwd)
+    if (rejection) {
+      deny(rejection)
+      return
+    }
     return
   }
 
@@ -319,16 +337,14 @@ function handleAgent(payload) {
 
   try {
     const brief = normalizeBrief(text(input.prompt))
-    // The small-fix marker is the human-authorized skip path, so it bypasses the structural
-    // contract too; structure and approval apply only to briefs that go through review.
-    if (isSmallFixExempt(agent, brief)) return
-
     const cwd = text(payload?.cwd) || process.cwd()
     const rejection = briefRejection(agent, brief, cwd)
     if (rejection) {
       deny(rejection)
       return
     }
+    // Small-fix skips the model review only; the instant guard still runs above.
+    if (isSmallFixExempt(agent, brief)) return
 
     const hash = sha256(brief)
     if (!consume(hash, text(payload?.session_id))) {
