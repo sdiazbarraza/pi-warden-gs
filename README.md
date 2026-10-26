@@ -246,7 +246,8 @@ Writer subagents (`gentle-ai-worker`, `gentle-ai-worker-infra`) only start with 
    commands, delivery and `.env` reads). Pi forces that check with `BRIEF_GUARD_FORCE_STRUCTURE=1`,
    so it applies to every writer brief regardless of `AGENTS.md` or of whether the working directory
    is a git repository. In Claude Code the same script runs as a hook, and there it activates only
-   in repositories whose `AGENTS.md` defines `### Brief del subagente`.
+   in repositories whose `AGENTS.md` defines `### Brief del subagente`. The reviewer still judges
+   verbatim acceptance-criteria matching against the issue and whether the plan is the right work.
 6. A brief whose first line is `<!-- review: skipped (small fix) -->` skips the model review and
    still runs the instant `brief-guard.sh` checks.
 7. `subagent_continue` and `subagent_send_message` to a writer task are always blocked: new

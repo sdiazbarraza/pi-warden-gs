@@ -69,6 +69,24 @@ test("ignores non-writer agents even when the check is forced", () => {
   assert.equal(result.status, 0)
 })
 
+const FORCE = { BRIEF_GUARD_FORCE_STRUCTURE: "1" }
+
+test("rejects every delivery-command form a brief can carry", () => {
+  for (const line of ["git -C /repo push origin main", "git  push origin main", "gh -R o/r pr create", "gh pr  merge 1"]) {
+    const result = run(VALID.replace("one line", `then ${line}`), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /must not contain git push/)
+  }
+})
+
+test("accepts Preconditions that label branch\/HEAD with capitals", () => {
+  const brief = VALID.replace(
+    "On expected branch feat/example; HEAD is that tip; tree is clean (git status --short).",
+    "Branch: feat/example; Head: abc123; tree clean via Git Status --short.",
+  )
+  assert.equal(run(brief, FORCE, emptyRepo()).status, 0)
+})
+
 test("keeps the repository trigger when no caller forces the check", () => {
   const cwd = emptyRepo()
   const malformed = "## Objective\nonly one heading\n"

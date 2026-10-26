@@ -82,7 +82,8 @@ END {
     print "- \"## Steps\" must start with: Strict TDD is active."
   if (weasel)
     print "- \"## Steps\" must not contain \"preferred\", \"may\", or \"if possible\""
-  if (("Preconditions" in seen) && body["Preconditions"] && (pre !~ /branch/ || pre !~ /HEAD/ || pre !~ /git status --short/))
+  lowpre = tolower(pre)
+  if (("Preconditions" in seen) && body["Preconditions"] && (lowpre !~ /branch/ || lowpre !~ /head/ || lowpre !~ /git status --short/))
     print "- \"## Preconditions\" must reference the expected branch, HEAD, and git status --short"
   for (i = 1; i <= ns; i++) {
     line = surf[i]
@@ -101,7 +102,9 @@ END {
   }
   if (ver ~ /export[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=\$\(/ || ver ~ /\|[ \t]*while[ \t]+read/)
     print "- \"## Verification\" must not hide failures with export VAR=$( or | while read"
-  if (raw ~ /git push/ || raw ~ /gh pr create/ || raw ~ /gh pr merge/ || raw ~ /gh pr edit/ || raw ~ /\.env/)
+  packed = raw
+  gsub(/[ \t]+/, " ", packed)
+  if (packed ~ /git( -[Cc] [^ \n]+| --[^ \n]+)* push/ || packed ~ /gh( -R [^ \n]+| --repo [^ \n]+)* pr (create|merge|edit)/ || raw ~ /\.env/)
     print "- brief must not contain git push, gh pr create|merge|edit, or .env file reads"
 }') || exit 0
 
