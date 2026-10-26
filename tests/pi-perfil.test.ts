@@ -18,8 +18,18 @@ function home() {
 const gentle = (dir: string, ...parts: string[]) => join(dir, ".pi", "gentle-ai", ...parts)
 const saveProfile = (dir: string, name: string, text = ROUTING) => writeFileSync(gentle(dir, "profiles", `${name}.json`), text)
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"))
+// The script resolves the agent home from PI_CODING_AGENT_DIR and the config home from
+// GENTLE_PI_CONFIG_HOME, so a host that exports them would redirect every fixture read to the
+// real machine: the connected providers came from the developer's own auth.json and the test
+// then failed for the wrong reason. Scrub both, the way install.test.ts scrubs PI_CODING_AGENT_DIR.
+const childEnv = (dir: string, shell: string) => {
+  const env = { ...process.env, HOME: dir, GENTLE_SHELL_BIN: shell }
+  delete (env as Record<string, string | undefined>).PI_CODING_AGENT_DIR
+  delete (env as Record<string, string | undefined>).GENTLE_PI_CONFIG_HOME
+  return env
+}
 const run = (dir: string, ...args: string[]) =>
-  spawnSync("bash", [SCRIPT, ...args], { encoding: "utf8", env: { ...process.env, HOME: dir, GENTLE_SHELL_BIN: "/nonexistent" } })
+  spawnSync("bash", [SCRIPT, ...args], { encoding: "utf8", env: childEnv(dir, "/nonexistent") })
 
 // Two agents, one on a provider that is connected and one that is not.
 const MULTI =
@@ -110,7 +120,7 @@ test("with an isolated gentle-shell home, profiles are read from and activated i
   const shell = join(dir, "gentle-shell")
   writeFileSync(shell, `#!/usr/bin/env bash\necho "isolated ${dir}/.gentle-shell/agent"\n`)
   chmodSync(shell, 0o755)
-  const out = spawnSync("bash", [SCRIPT, "gpt"], { encoding: "utf8", env: { ...process.env, HOME: dir, GENTLE_SHELL_BIN: shell } })
+  const out = spawnSync("bash", [SCRIPT, "gpt"], { encoding: "utf8", env: childEnv(dir, shell) })
   assert.equal(out.status, 0, out.stderr)
   assert.equal(readJson(join(config, "profiles.json")).active, "gpt")
   assert.equal(existsSync(join(dir, ".pi", "gentle-ai")), false)
