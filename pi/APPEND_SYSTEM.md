@@ -84,10 +84,10 @@ gentle-pi. Project rules belong in each project's AGENTS.md.
   branch, `HEAD`, and `git status --short`; `## Allowed edit surfaces` lines
   are repository-relative paths or narrow globs (no bullets, `.`, absolute
   paths, or unquoted spaces); `## Verification` has no `export VAR=$(` or
-  `| while read`; the brief has no `git push`, `gh pr create|merge|edit`, or
-  `.env` reads. Fail-open on parse. The reviewer judges the rest: acceptance
-  criteria copied verbatim, whether checks can fail, and whether the plan is
-  the right work. A small-fix brief starting with
+  `| while read`. It validates brief structure only; the execution-time guard
+  owns the delivery and `.env` rules. Fail-open on parse. The reviewer judges
+  the rest: acceptance criteria copied verbatim, whether checks can fail, and
+  whether the plan is the right work. A small-fix brief starting with
   `<!-- review: skipped (small fix) -->` skips the model review and still
   runs these instant checks.
 - The text between the markers must be byte-identical to the later launch's

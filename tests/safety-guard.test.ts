@@ -453,10 +453,10 @@ test("briefRejection rejects Verification commands that hide failures", () => {
   assert.match(out ?? "", /must not hide failures with export VAR=\$\( or \| while read/)
 })
 
-test("briefRejection rejects delivery commands and .env reads anywhere in the brief", () => {
-  const brief = CONTRACT_BRIEF.replace("one line", "then git push origin main and cat .env")
+test("briefRejection accepts a brief that names a delivery command", () => {
+  const brief = CONTRACT_BRIEF.replace("one line", "then git push origin main")
   const out = briefRejection("gentle-ai-worker", brief, mkdtempSync(join(tmpdir(), "brief-gate-")))
-  assert.match(out ?? "", /must not contain git push, gh pr create\|merge\|edit, or \.env file reads/)
+  assert.equal(out, null, out ?? "")
 })
 
 test("briefRejection accepts a valid contract brief", () => {
