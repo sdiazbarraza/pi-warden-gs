@@ -174,15 +174,22 @@ function trimShellPunctuation(token) {
   }
 }
 
+/** Quotes are shell syntax, not part of the path: "cat .e''nv" names .env. */
+function removeQuotes(token) {
+  return token.replace(/["']/g, "")
+}
+
 /**
  * The name of the environment file the command reads, or null.
  * A token ending in ".env" or ".env.*" names one; the exact ".env.example"
  * is the template, not a secret, and stays allowed.
+ * The rule matches a literal path: the quotes inside a token are removed before
+ * the name is compared, and a path assembled by shell expansion is not detected.
  */
 export function envPathMatch(command) {
   for (const token of String(command ?? "").split(ENV_TOKEN_SEPARATORS)) {
     if (!token) continue
-    const base = trimShellPunctuation(baseName(trimTrailingSlash(trimShellPunctuation(token))))
+    const base = trimShellPunctuation(baseName(trimTrailingSlash(trimShellPunctuation(removeQuotes(token)))))
     if (base === ".env.example") continue
     if (base === ".env" || base.startsWith(".env.")) return base
   }

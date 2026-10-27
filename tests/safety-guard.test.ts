@@ -384,6 +384,41 @@ test("envPathMatch names the environment file behind an operator or a trailing s
   }
 })
 
+// The acceptance cases of the interior-quote rule: the quotes inside a token are
+// removed before the name is compared, so "cat .e''nv" names .env, and the
+// commands without interior quotes keep their labels.
+const ENV_QUOTE_CASES: Array<[string | null, string]> = [
+  [".env", "cat .e''nv"],
+  [".env", 'cat .e""nv'],
+  [".env", "cat .env"],
+  [".env", "cat config/.env"],
+  [".env.bak", "cat .env.bak"],
+  [".env", "cat .env|tee"],
+  [".env", "ls .env/"],
+  [null, "cat .env.example"],
+  [null, "cat backup.env.example"],
+  [null, "cat my.env"],
+  [null, "cat .envrc"],
+]
+
+test("envPathMatch names the environment file behind quotes inside a token", () => {
+  for (const [expected, command] of ENV_QUOTE_CASES) {
+    assert.equal(envPathMatch(command), expected, command)
+  }
+})
+
+test("integration: an environment file read with quotes inside the token is blocked", async () => {
+  const { fire } = setup()
+  for (const command of ["cat .e''nv", 'cat .e""nv']) {
+    const out = await fire("tool_call", shell("bash", command))
+    assert.equal(out?.block, true, command)
+    assert.match(out?.reason ?? "", /Environment files hold secrets/)
+  }
+  for (const command of ["cat .env.example", "cat backup.env.example", "cat my.env", "cat .envrc"]) {
+    assert.equal((await fire("tool_call", shell("bash", command)))?.block, undefined, command)
+  }
+})
+
 test("integration: commands that name an environment file are blocked", async () => {
   const { fire } = setup()
   for (const [label, command] of ENV_BLOCKED_CASES) {

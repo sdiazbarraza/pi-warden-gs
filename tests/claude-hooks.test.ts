@@ -279,6 +279,33 @@ test("the unchanged environment file commands keep their labels", () => {
   }
 })
 
+test("blocks an environment file read with quotes inside the token", () => {
+  for (const command of ["cat .e''nv", 'cat .e""nv']) {
+    const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(deniedReason(result.stdout), ENV_BLOCKED(".env"), command)
+  }
+})
+
+test("the unchanged environment file commands keep their labels behind interior quotes", () => {
+  for (const [label, command] of [
+    [".env", "cat .env"],
+    [".env", "cat config/.env"],
+    [".env.bak", "cat .env.bak"],
+    [".env", "cat .env|tee"],
+    [".env", "ls .env/"],
+  ] as Array<[string, string]>) {
+    const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(deniedReason(result.stdout), ENV_BLOCKED(label), command)
+  }
+  for (const command of ["cat .env.example", "cat backup.env.example", "cat my.env", "cat .envrc"]) {
+    const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.trim(), "", command)
+  }
+})
+
 test("blocks an environment file read inside the publisher subagent", () => {
   const t = transcripts()
   const result = runHook(

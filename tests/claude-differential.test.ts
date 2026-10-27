@@ -109,6 +109,9 @@ const CORPUS: string[] = [
   "cat .env&&echo",
   "cat .env>",
   "ls .env/",
+  // the quotes inside a token are removed before the name is compared
+  "cat .e''nv",
+  'cat .e""nv',
 ]
 
 type Matcher = (command: string) => string | null
@@ -169,6 +172,17 @@ test("both hosts name the same file behind an operator or a trailing slash", () 
   for (const command of ["cat .env|tee", "cat .env&&echo", "cat .env>", "ls .env/"]) {
     assert.equal(piEnvPathMatch(command), ".env", command)
     assert.equal(claudeEnvPathMatch(command), ".env", command)
+  }
+})
+
+test("both hosts name the same file behind quotes inside a token", () => {
+  for (const command of ["cat .e''nv", 'cat .e""nv']) {
+    assert.equal(piEnvPathMatch(command), ".env", command)
+    assert.equal(claudeEnvPathMatch(command), ".env", command)
+  }
+  for (const command of ["cat .env.example", "cat backup.env.example", "cat my.env", "cat .envrc"]) {
+    assert.equal(piEnvPathMatch(command), null, command)
+    assert.equal(claudeEnvPathMatch(command), null, command)
   }
 })
 

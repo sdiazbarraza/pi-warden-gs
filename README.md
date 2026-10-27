@@ -220,7 +220,7 @@ export default function (pi: ExtensionAPI) {
 | Extension | Hooks | What it does | Failure mode |
 | --- | --- | --- | --- |
 | `safety-guard.ts` | `tool_call` | Blocks destructive bash commands, blocks direct delivery commands outside `gentle-ai-publisher`, blocks heavy builds in the orchestrator, and gates writer dispatch on a reviewed brief | Fail-**closed** on writer dispatch (any guard error blocks), fail-open on the bash destructive check |
-| `brief-guard.sh` (hook) | Claude Code `PreToolUse`, and spawned by `safety-guard` | Checks the eight required brief sections, their order, the stop-and-report clause, size, TDD line, weasel words, preconditions, edit surfaces and hidden-failure commands: it validates brief structure only, and the execution-time guard owns the delivery and `.env` rules | Fail-open on parsing, exit 2 on a malformed brief |
+| `brief-guard.sh` (hook) | Claude Code `PreToolUse`, and spawned by `safety-guard` | Checks the eight required brief sections, their order, the stop-and-report clause, size, TDD line, weasel words, preconditions, edit surfaces and hidden-failure commands: it validates brief structure only, and the execution-time guard owns the delivery and `.env` rules, which match a literal path in the command line | Fail-open on parsing, exit 2 on a malformed brief |
 | `reply-length.ts` | `before_agent_start` | Adds one hidden reminder per user-started run of the main session: at most 5 lines of at most 25 words, outcome first, long content in a file | Cannot fail: it only appends a message |
 | `rtk.ts` | `tool_call` | Rewrites bash commands to use `rtk` for token savings | Leaves commands alone when it cannot rewrite them |
 
@@ -244,7 +244,10 @@ Writer subagents (`gentle-ai-worker`, `gentle-ai-worker-infra`) only start with 
 5. Before the approval is consumed, `hooks/brief-guard.sh` checks the structure and the extra
    mechanical rules (size, TDD line, weasel words, preconditions, edit surfaces and hidden-failure
    commands). It validates brief structure only: the delivery and `.env` rules belong to the
-   execution-time guard, which sees the command that will run. Pi forces that check with
+   execution-time guard, which sees the command that will run. The `.env` rule matches a literal
+   path in that command line: the quotes inside a token are removed before the name is compared
+   (`cat .e''nv` names `.env`), and a path assembled by shell expansion (`$FILE`, `$(...)`) is a
+   known limit the rule does not detect. Pi forces that check with
    `BRIEF_GUARD_FORCE_STRUCTURE=1`, so it applies to every writer brief regardless of `AGENTS.md`
    or of whether the working directory is a git repository. In Claude Code the same script runs
    as a hook, and there it activates only in repositories whose `AGENTS.md` defines
@@ -289,7 +292,11 @@ replaced, and the script can run repeatedly.
   and other agents are blocked. Builds, test runs and container runs (`dotnet-in-docker.sh`,
   `docker run|build|exec`, `docker compose up|run|build|exec`) are blocked in the orchestrator and
   allowed in subagents, and read-only docker queries stay allowed. Checks cover `bash`,
-  `bash_background` and `monitor`.
+  `bash_background` and `monitor`. A command that names an environment file (`.env` or `.env.*`,
+  except the exact `.env.example`) is blocked everywhere, publisher included: that rule matches a
+  literal path in the command line, removes the quotes inside a token before comparing the name
+  (`cat .e''nv` names `.env`), and does not evaluate shell expansion, so a path assembled at
+  runtime (`$FILE`, `$(...)`) is a known limit.
 - `extensions/reply-length.ts`: adds one hidden reminder before every user-started run of the main
   session (never in subagents) to answer in at most 5 lines of at most 25 words each, one sentence
   per line, outcome first and long content in a file. The reminder is the single home of that
