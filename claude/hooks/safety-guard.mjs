@@ -152,9 +152,18 @@ function baseName(token) {
   return token.split(/[/:]/).pop() ?? ""
 }
 
-/** Quotes are shell syntax, not part of the path: '"config/.env"' names config/.env. */
-function stripQuotes(token) {
-  return token.replace(/^["']+/, "").replace(/["']+$/, "")
+/** Shell punctuation is syntax, not part of the path: "('.env')" names .env. */
+const SHELL_PUNCTUATION = new Set(['"', "'", "`", ";", ",", "(", ")", "[", "]", "{", "}"])
+
+/** Removes the leading and trailing shell punctuation of a name; its own dots stay. */
+function trimShellPunctuation(token) {
+  let out = token
+  for (;;) {
+    const first = out.length > 0 && SHELL_PUNCTUATION.has(out[0]) ? 1 : 0
+    const last = out.length > 0 && SHELL_PUNCTUATION.has(out[out.length - 1]) ? out.length - 1 : out.length
+    if (first === 0 && last === out.length) return out
+    out = out.slice(first, last)
+  }
 }
 
 /**
@@ -165,7 +174,7 @@ function stripQuotes(token) {
 export function envPathMatch(command) {
   for (const token of String(command ?? "").split(/\s+/)) {
     if (!token) continue
-    const base = baseName(stripQuotes(token))
+    const base = trimShellPunctuation(baseName(token))
     if (base === ".env.example") continue
     if (base === ".env" || base.startsWith(".env.")) return base
   }

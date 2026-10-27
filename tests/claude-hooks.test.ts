@@ -214,6 +214,14 @@ const ENV_CASES: Array<[string, string]> = [
   [".env", 'cat ".env"'],
   [".env", "cat '.env'"],
   [".env", 'cat "config/.env"'],
+  // Punctuated paths name the same file: the punctuation is shell syntax, not part of the path.
+  [".env", "cat .env;"],
+  [".env", "(cat .env)"],
+  [".env", "cat .env)"],
+  [".env", "cat .env,"],
+  [".env", "('.env')"],
+  // The dot of a backup name is part of the name: ".env.bak" is still an environment file.
+  [".env.bak", "cat .env.bak"],
 ]
 
 for (const [label, command] of ENV_CASES) {
@@ -230,6 +238,9 @@ test("allows reading the example environment file", () => {
     "cat backup.env.example",
     'cat ".env.example"',
     'cat "backup.env.example"',
+    // Names that only look like an environment file stay readable.
+    "cat my.env",
+    "cat .envrc",
   ]) {
     const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
     assert.equal(result.status, 0, result.stderr)

@@ -169,9 +169,18 @@ function baseName(token: string): string {
   return token.split(/[/:]/).pop() ?? ""
 }
 
-// Quotes are shell syntax, not part of the path: '"config/.env"' names config/.env.
-function stripQuotes(token: string): string {
-  return token.replace(/^["']+/, "").replace(/["']+$/, "")
+// Shell punctuation is syntax, not part of the path: "('.env')" names .env.
+const SHELL_PUNCTUATION = new Set(['"', "'", "`", ";", ",", "(", ")", "[", "]", "{", "}"])
+
+// Removes the leading and trailing shell punctuation of a name; its own dots stay.
+function trimShellPunctuation(token: string): string {
+  let out = token
+  for (;;) {
+    const first = out.length > 0 && SHELL_PUNCTUATION.has(out[0]) ? 1 : 0
+    const last = out.length > 0 && SHELL_PUNCTUATION.has(out[out.length - 1]) ? out.length - 1 : out.length
+    if (first === 0 && last === out.length) return out
+    out = out.slice(first, last)
+  }
 }
 
 // An environment file is named when a token ends in ".env" or ".env.*".
@@ -179,7 +188,7 @@ function stripQuotes(token: string): string {
 export function envPathMatch(command: string): string | null {
   for (const token of command.split(/\s+/)) {
     if (!token) continue
-    const base = baseName(stripQuotes(token))
+    const base = trimShellPunctuation(baseName(token))
     if (base === ".env.example") continue
     if (base === ".env" || base.startsWith(".env.")) return base
   }

@@ -303,6 +303,14 @@ const ENV_BLOCKED_CASES: Array<[string, string]> = [
   [".env", 'cat ".env"'],
   [".env", "cat '.env'"],
   [".env", 'cat "config/.env"'],
+  // Punctuated paths name the same file: the punctuation is shell syntax, not part of the path.
+  [".env", "cat .env;"],
+  [".env", "(cat .env)"],
+  [".env", "cat .env)"],
+  [".env", "cat .env,"],
+  [".env", "('.env')"],
+  // The dot of a backup name is part of the name: ".env.bak" is still an environment file.
+  [".env.bak", "cat .env.bak"],
 ]
 
 const ENV_ALLOWED_CASES = [
@@ -310,6 +318,9 @@ const ENV_ALLOWED_CASES = [
   "cat backup.env.example",
   'cat ".env.example"',
   'cat "backup.env.example"',
+  // Names that only look like an environment file stay readable.
+  "cat my.env",
+  "cat .envrc",
 ]
 
 test("envPathMatch names the environment file a command reads", () => {
@@ -318,6 +329,29 @@ test("envPathMatch names the environment file a command reads", () => {
   }
   for (const command of ENV_ALLOWED_CASES) {
     assert.equal(envPathMatch(command), null, command)
+  }
+})
+
+// The acceptance cases of the environment-path rule: a punctuated path names the
+// same file, and a name that only looks like one stays readable.
+const ENV_PATH_CASES: Array<[string | null, string]> = [
+  [".env", "cat .env"],
+  [".env", "cat '.env'"],
+  [".env.bak", "cat .env.bak"],
+  [null, "cat .env.example"],
+  [null, "cat backup.env.example"],
+  [null, "cat my.env"],
+  [null, "cat .envrc"],
+  [".env", "cat .env;"],
+  [".env", "(cat .env)"],
+  [".env", "cat .env)"],
+  [".env", "cat .env,"],
+  [".env", "('.env')"],
+]
+
+test("envPathMatch names the environment file behind shell punctuation", () => {
+  for (const [expected, command] of ENV_PATH_CASES) {
+    assert.equal(envPathMatch(command), expected, command)
   }
 })
 
