@@ -365,6 +365,22 @@ test("rejects shell assignment prefixes before a command", () => {
   }
 })
 
+test("keeps unquoted and single-token quoted assignment prefixes rejected", () => {
+  for (const line of ["TOKEN=x cat .env", 'TOKEN="x" git push', "A=1 B=2 cat .env"]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /must not contain git push/, line)
+  }
+})
+
+test("rejects quoted assignment prefixes whose value contains a space", () => {
+  for (const line of ['TOKEN="x y" cat .env', 'CI="blue green" git push', "TOKEN='x y' cat .env"]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /must not contain git push/, line)
+  }
+})
+
 test("rejects timeout-wrapped commands", () => {
   for (const line of ["timeout git push", "timeout 5 git push origin main", "timeout 10 cat .env", "timeout -s KILL 5 gh pr create"]) {
     const result = run(VALID.replace("one line", line), FORCE, emptyRepo())

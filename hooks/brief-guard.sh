@@ -66,6 +66,13 @@ function hasneg(s) {
   if (s ~ /(is|are|was|were|being|remains|stays|must|should|shall)[[:space:]]+(be[[:space:]]+)?(not[[:space:]]+)?(forbidden|prohibited|blocked|disallowed|avoided|not[[:space:]]+allowed)/) return 1
   return 0
 }
+# stripassign: drop leading shell assignment prefixes (VAR=value). The quoted forms are
+# matched on the raw text, before quote stripping, because a quoted value may contain a
+# space and stripping quotes first would end the prefix at that space ("x y" -> "x y").
+function stripassign(s) {
+  while (sub("^[[:space:]]*" assignpre, "", s)) { }
+  return s
+}
 # segbad: every command the line runs. Negation is per command segment, so
 # "never push; cat .env" still reads .env.
 function segbad(line,   n, parts, i, s, whole) {
@@ -73,6 +80,7 @@ function segbad(line,   n, parts, i, s, whole) {
   # noise for these patterns.
   whole = line
   sub(/(^|[[:space:]])#.*$/, "", whole)
+  whole = stripassign(whole)
   gsub("[" dq sq bt "]", "", whole)
   whole = trim(whole)
   if (whole != "" && !hasneg(whole) && envbad(whole)) envread = 1
@@ -82,6 +90,7 @@ function segbad(line,   n, parts, i, s, whole) {
   for (i = 1; i <= n; i++) {
     s = parts[i]
     sub(/(^|[[:space:]])#.*$/, "", s)
+    s = stripassign(s)
     gsub("[" dq sq bt "]", "", s)
     # a trailing ")" closes a substitution or a subshell around this command
     sub(/[)]+$/, "", s)
@@ -94,6 +103,8 @@ function segbad(line,   n, parts, i, s, whole) {
   }
 }
 BEGIN {
+  # Quoting characters are built from codes so this program stays inside single quotes.
+  dq = sprintf("%c", 34); sq = sprintf("%c", 39); bt = sprintf("%c", 96)
   list = "Objective|Preconditions|Steps|Allowed edit surfaces|Verification|Acceptance criteria|Architecture constraints|Report"
   n = split(list, req, "|")
   for (i = 1; i <= n; i++) idx[req[i]] = i
@@ -106,13 +117,14 @@ BEGIN {
   nest = nest "|(bash|sh|zsh|dash|eval|exec)([[:space:]]+-[^[:space:]]+)*[[:space:]]+"
   nest = nest "|find([[:space:]]+[^[:space:]]+)*[[:space:]]+-exec[[:space:]]+"
   nest = nest "|((/[^[:space:]/]+)+/|(\\.\\.?/)+)[[:space:]]*"
-  nest = nest "|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+"
+  # A shell assignment prefix may carry a quoted value, including one with spaces.
+  nest = nest "|[A-Za-z_][A-Za-z0-9_]*=(" dq "[^" dq "]*" dq "|" sq "[^" sq "]*" sq "|[^[:space:]]*)[[:space:]]+"
   head = "(" nest ")*"
+  # assignpre is matched on raw text, where the quote characters still delimit the value.
+  assignpre = "[A-Za-z_][A-Za-z0-9_]*=(" dq "[^" dq "]*" dq "|" sq "[^" sq "]*" sq "|[^[:space:]" dq sq "]*)[[:space:]]+"
   # Readers expose file contents with or without a dedicated "read" verb.
   readers = "(cat|source|grep|egrep|fgrep|rg|sed|awk|perl|python3?|node|bash|sh|zsh|cp|mv|ln|less|more|head|tail|read|jq|diff|cmp|sort|uniq|wc|tee|cut|tr|env|dotenv|export|realpath|stat"
   readers = readers "|strings|dd|od|xxd|hexdump|openssl|curl|file|ls|bat|tac|rev|nl|column|paste|join|comm|split|csplit|shuf|fold|fmt)"
-  # Quoting characters are built from codes so this program stays inside single quotes.
-  dq = sprintf("%c", 34); sq = sprintf("%c", 39); bt = sprintf("%c", 96)
 }
 {
   raw = raw $0 "\n"
