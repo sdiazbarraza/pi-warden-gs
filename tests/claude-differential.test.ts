@@ -9,12 +9,14 @@ import {
   destructiveMatch as piDestructiveMatch,
   heavyMatch as piHeavyMatch,
   deliveryMatch as piDeliveryMatch,
+  envPathMatch as piEnvPathMatch,
 } from "../extensions/safety-guard.ts"
 
 import {
   destructiveMatch as claudeDestructiveMatch,
   heavyMatch as claudeHeavyMatch,
   deliveryMatch as claudeDeliveryMatch,
+  envPathMatch as claudeEnvPathMatch,
 } from "../claude/hooks/safety-guard.mjs"
 
 const CORPUS: string[] = [
@@ -74,6 +76,17 @@ const CORPUS: string[] = [
   "grep -n docker <<'EOF'\ndocker rm -f x\nEOF",
   "bash <<'EOF'\nsudo rm -rf /\nEOF",
   "cat <<'EOF' | bash\nsudo rm -rf /\nEOF",
+  // environment files
+  "cat .env",
+  "cat config/.env",
+  "busybox cat .env",
+  "git show HEAD:.env",
+  "git diff -- .env",
+  "cat .env.local",
+  "cat .env.example.local",
+  "cp .env.example .env",
+  "cat .env.example",
+  "cat backup.env.example",
 ]
 
 type Matcher = (command: string) => string | null
@@ -100,6 +113,10 @@ test("heavy commands match identically in both implementations", () => {
 
 test("delivery commands match identically in both implementations", () => {
   compare("deliveryMatch", piDeliveryMatch, claudeDeliveryMatch)
+})
+
+test("environment file commands match identically in both implementations", () => {
+  compare("envPathMatch", piEnvPathMatch, claudeEnvPathMatch)
 })
 
 test("the corpus keeps covering every destructive label", () => {

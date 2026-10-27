@@ -21,6 +21,8 @@ const HEAVY_BLOCKED = (label: string) =>
   `safety-guard: "${label}" runs only in a subagent. Delegate it to gentle-ai-runner (commands only) or gentle-ai-worker-infra (when it also edits files). If they are unavailable, stop and tell the human instead of running it here.`
 const DELIVERY_BLOCKED = (label: string) =>
   `safety-guard: "${label}" runs only inside gentle-ai-publisher. Delegate the exact git/gh commands to gentle-ai-publisher (mode "task") with the human's authorization.`
+const ENV_BLOCKED = (label: string) =>
+  `safety-guard: "${label}" is blocked. Environment files hold secrets and must not be read by an agent. If the human explicitly authorized it, ask them to run it themselves.`
 const NOT_APPROVED =
   'safety-guard: brief not approved. Run gentle-ai-brief-review with mode "task" and this exact text between <<<BRIEF and BRIEF>>>, then relaunch the identical text. Approvals are single-use.'
 const WRITER_FOLLOWUP =
@@ -195,6 +197,45 @@ test("blocks gh pr merge in the main session", () => {
   const result = runHook("safety-guard.mjs", payload({ tool_input: { command: "gh -R a/b pr merge" } }))
   assert.equal(result.status, 0, result.stderr)
   assert.equal(deniedReason(result.stdout), DELIVERY_BLOCKED("gh pr merge"))
+})
+
+// --- environment-file gate ------------------------------------------------
+
+const ENV_CASES: Array<[string, string]> = [
+  [".env", "cat .env"],
+  [".env", "cat config/.env"],
+  [".env", "busybox cat .env"],
+  [".env", "git show HEAD:.env"],
+  [".env", "git diff -- .env"],
+  [".env.local", "cat .env.local"],
+  [".env.example.local", "cat .env.example.local"],
+  [".env", "cp .env.example .env"],
+]
+
+for (const [label, command] of ENV_CASES) {
+  test(`blocks the environment file read "${command}"`, () => {
+    const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(deniedReason(result.stdout), ENV_BLOCKED(label))
+  })
+}
+
+test("allows reading the example environment file", () => {
+  for (const command of ["cat .env.example", "cat backup.env.example"]) {
+    const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.trim(), "", command)
+  }
+})
+
+test("blocks an environment file read inside the publisher subagent", () => {
+  const t = transcripts()
+  const result = runHook(
+    "safety-guard.mjs",
+    payload({ transcript_path: t.publisher, tool_input: { command: "cat .env" } }),
+  )
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(deniedReason(result.stdout), ENV_BLOCKED(".env"))
 })
 
 // --- heavy-build gate (S3) ------------------------------------------------

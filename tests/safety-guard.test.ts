@@ -11,6 +11,7 @@ import guard, {
   briefOf,
   briefRejection,
   deliveryMatch,
+  envPathMatch,
   heavyMatch,
   destructiveMatch,
   isPublisherProcess,
@@ -285,6 +286,54 @@ test("integration: the publisher may push but never force-push", async () => {
   assert.equal((await fire("tool_call", shell("bash", "git push -u origin issue/5-a")))?.block, undefined)
   assert.equal((await fire("tool_call", shell("bash", "gh pr merge 59 --merge")))?.block, undefined)
   assert.equal((await fire("tool_call", shell("bash", "git push --force origin main")))?.block, true)
+})
+
+// The execution-time environment-file rule: a command that names a .env file is blocked
+// in every host, publisher included.
+const ENV_BLOCKED_CASES: Array<[string, string]> = [
+  [".env", "cat .env"],
+  [".env", "cat config/.env"],
+  [".env", "busybox cat .env"],
+  [".env", "git show HEAD:.env"],
+  [".env", "git diff -- .env"],
+  [".env.local", "cat .env.local"],
+  [".env.example.local", "cat .env.example.local"],
+  [".env", "cp .env.example .env"],
+]
+
+const ENV_ALLOWED_CASES = ["cat .env.example", "cat backup.env.example"]
+
+test("envPathMatch names the environment file a command reads", () => {
+  for (const [label, command] of ENV_BLOCKED_CASES) {
+    assert.equal(envPathMatch(command), label, command)
+  }
+  for (const command of ENV_ALLOWED_CASES) {
+    assert.equal(envPathMatch(command), null, command)
+  }
+})
+
+test("integration: commands that name an environment file are blocked", async () => {
+  const { fire } = setup()
+  for (const [label, command] of ENV_BLOCKED_CASES) {
+    const out = await fire("tool_call", shell("bash", command))
+    assert.equal(out?.block, true, command)
+    assert.match(out?.reason ?? "", /Environment files hold secrets/)
+  }
+})
+
+test("integration: the example environment file stays readable", async () => {
+  const { fire } = setup()
+  for (const command of ENV_ALLOWED_CASES) {
+    assert.equal((await fire("tool_call", shell("bash", command)))?.block, undefined, command)
+  }
+})
+
+test("integration: the publisher may deliver but cannot read an environment file", async () => {
+  const { fire } = setup(true)
+  assert.equal((await fire("tool_call", shell("bash", "git push -u origin issue/5-a")))?.block, undefined)
+  const out = await fire("tool_call", shell("bash", "cat .env"))
+  assert.equal(out?.block, true)
+  assert.match(out?.reason ?? "", /Environment files hold secrets/)
 })
 
 test("integration: destructive commands are also checked in bash_background", async () => {
