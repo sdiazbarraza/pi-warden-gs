@@ -38,6 +38,24 @@ function isread(line,   t) {
   if (t ~ /--env-file([ =])?\.env/) return 1
   return 0
 }
+# envbad: a line reads a .env file in at least one of its commands. The .env.example
+# exemption is applied per semicolon/pipe/ampersand command, and only for a basename that
+# is exactly ".env.example": the left anchor rejects a preceding "." or "-", so
+# "foo..env.example" and "backup.env.example" stay reads, and a sibling read in the same
+# line ("cat .env.example; cat .env") is not covered by the exemption.
+function envbad(line,   n, parts, i, p, t) {
+  n = split(line, parts, /[;&|]/)
+  for (i = 1; i <= n; i++) {
+    p = parts[i]
+    sub(/^[[:space:]]+/, "", p)
+    sub(/[[:space:]]+$/, "", p)
+    if (p == "" || !isread(p)) continue
+    t = p
+    gsub(/(^|[^A-Za-z0-9_.-])\.env\.example([^A-Za-z0-9_.-]|$)/, " ", t)
+    if (t ~ /\.env([^A-Za-z0-9_]|$)/) return 1
+  }
+  return 0
+}
 BEGIN {
   list = "Objective|Preconditions|Steps|Allowed edit surfaces|Verification|Acceptance criteria|Architecture constraints|Report"
   n = split(list, req, "|")
@@ -50,10 +68,12 @@ BEGIN {
   sub(/[[:space:]]+$/, "", cmd)
   gsub(/[ \t]+/, " ", cmd)
   neg = cmd ~ /(^|[^A-Za-z0-9_])(do[[:space:]]+not|must[[:space:]]+not|never|avoid|without|should[[:space:]]+not)[[:space:]]/
-  if (cmd ~ /(is|are|was|were|being|must|should|shall)[[:space:]]+(not[[:space:]]+)?(forbidden|prohibited|blocked|disallowed|not[[:space:]]+allowed)/) neg = 1
+  # Prohibition prose: copula or modal, optional "be"/"not", then the prohibition. This
+  # covers "git push should be avoided" without ever excusing a real delivery command.
+  if (cmd ~ /(is|are|was|were|being|remains|stays|must|should|shall)[[:space:]]+(be[[:space:]]+)?(not[[:space:]]+)?(forbidden|prohibited|blocked|disallowed|avoided|not[[:space:]]+allowed)/) neg = 1
   if (!neg && cmd ~ /(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)/) delivery = 1
   if (!neg && cmd ~ /(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)/) delivery = 1
-  if (!neg && isread(cmd) && cmd ~ /\.env([^A-Za-z0-9_]|$)/ && cmd !~ /(^|[^A-Za-z0-9_])\.env\.example([[:space:]\/"`]|$)/) envread = 1
+  if (!neg && envbad(cmd)) envread = 1
 }
 /^[[:space:]]*(```|~~~)/ {
   fence = !fence

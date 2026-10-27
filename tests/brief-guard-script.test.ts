@@ -114,6 +114,8 @@ test("rejects quoted export command substitution in Verification", () => {
 test("allows .env.example and rejects .env.local reads", () => {
   const ok = run(VALID.replace("one line", "cat .env.example"), FORCE, emptyRepo())
   assert.equal(ok.status, 0, ok.stderr)
+  const quoted = run(VALID.replace("one line", "cat '.env.example'"), FORCE, emptyRepo())
+  assert.equal(quoted.status, 0, quoted.stderr)
   const bad = run(VALID.replace("one line", "cat .env.local"), FORCE, emptyRepo())
   assert.equal(bad.status, 2)
   assert.match(bad.stderr, /\.env file reads/)
@@ -129,6 +131,46 @@ test("flags non-exact env names like backup.env.example", () => {
   const bad = run(VALID.replace("one line", "cat backup.env.example"), FORCE, emptyRepo())
   assert.equal(bad.status, 2)
   assert.match(bad.stderr, /\.env file reads/)
+})
+
+test("flags a lookalike whose name only ends with .env.example", () => {
+  const bad = run(VALID.replace("one line", "cat foo..env.example"), FORCE, emptyRepo())
+  assert.equal(bad.status, 2)
+  assert.match(bad.stderr, /\.env file reads/)
+})
+
+test("exempts .env.example per command, not per whole line", () => {
+  for (const line of ["cat .env.example; cat .env", "cat .env.example | cat .env", "cat .env.example && cat .env"]) {
+    const bad = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(bad.status, 2, line)
+    assert.match(bad.stderr, /\.env file reads/, line)
+  }
+  // Only the .env.example token is exempt, so a second .env operand in the same command stays a read.
+  const sibling = run(VALID.replace("one line", "cp .env.example .env"), FORCE, emptyRepo())
+  assert.equal(sibling.status, 2)
+  assert.match(sibling.stderr, /\.env file reads/)
+  const ok = run(VALID.replace("one line", "cat .env.example; echo done"), FORCE, emptyRepo())
+  assert.equal(ok.status, 0, ok.stderr)
+})
+
+test("allows copula prohibition prose for delivery commands", () => {
+  for (const line of [
+    "git push is forbidden",
+    "git push should be avoided",
+    "git push must not be allowed",
+    "git push remains prohibited",
+    "gh pr edit was avoided",
+  ]) {
+    const ok = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(ok.status, 0, `${line}: ${ok.stderr}`)
+  }
+})
+
+test("keeps real delivery commands blocked when prohibition prose appears elsewhere", () => {
+  const brief = VALID.replace("one line", "git push should be avoided\nthen git push origin main")
+  const bad = run(brief, FORCE, emptyRepo())
+  assert.equal(bad.status, 2)
+  assert.match(bad.stderr, /must not contain git push/)
 })
 
 test("allows prose mentions of env files and unrelated .environment", () => {
@@ -152,6 +194,7 @@ test("measures size on LF-normalized bytes", () => {
   const at = core.replace("add the flag", "add the flag" + "x".repeat(3072 - base))
   assert.equal(run(under, FORCE, emptyRepo()).status, 0, "under 3072 passes")
   assert.equal(run(at, FORCE, emptyRepo()).status, 2, "3072 bytes rejected")
+  assert.equal(run(under.replace(/\n/g, "\r\n"), FORCE, emptyRepo()).status, 0, "CRLF under LF limit still passes")
   assert.equal(run(at.replace(/\n/g, "\r\n"), FORCE, emptyRepo()).status, 2, "CRLF keeps the size verdict")
 })
 
