@@ -87,6 +87,12 @@ const CORPUS: string[] = [
   "cp .env.example .env",
   "cat .env.example",
   "cat backup.env.example",
+  // quoted paths name the same file
+  'cat ".env"',
+  "cat '.env'",
+  'cat "config/.env"',
+  'cat ".env.example"',
+  'cat "backup.env.example"',
 ]
 
 type Matcher = (command: string) => string | null
@@ -117,6 +123,17 @@ test("delivery commands match identically in both implementations", () => {
 
 test("environment file commands match identically in both implementations", () => {
   compare("envPathMatch", piEnvPathMatch, claudeEnvPathMatch)
+})
+
+test("the corpus covers the quoted environment file commands", () => {
+  for (const command of ['cat ".env"', "cat '.env'", 'cat "config/.env"']) {
+    assert.equal(piEnvPathMatch(command), ".env", command)
+    assert.equal(claudeEnvPathMatch(command), ".env", command)
+  }
+  for (const command of ['cat ".env.example"', 'cat "backup.env.example"']) {
+    assert.equal(piEnvPathMatch(command), null, command)
+    assert.equal(claudeEnvPathMatch(command), null, command)
+  }
 })
 
 test("the corpus keeps covering every destructive label", () => {

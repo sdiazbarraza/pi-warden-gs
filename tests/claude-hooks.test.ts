@@ -210,6 +210,10 @@ const ENV_CASES: Array<[string, string]> = [
   [".env.local", "cat .env.local"],
   [".env.example.local", "cat .env.example.local"],
   [".env", "cp .env.example .env"],
+  // Quoted paths name the same file: the quotes are shell syntax, not part of the path.
+  [".env", 'cat ".env"'],
+  [".env", "cat '.env'"],
+  [".env", 'cat "config/.env"'],
 ]
 
 for (const [label, command] of ENV_CASES) {
@@ -221,7 +225,12 @@ for (const [label, command] of ENV_CASES) {
 }
 
 test("allows reading the example environment file", () => {
-  for (const command of ["cat .env.example", "cat backup.env.example"]) {
+  for (const command of [
+    "cat .env.example",
+    "cat backup.env.example",
+    'cat ".env.example"',
+    'cat "backup.env.example"',
+  ]) {
     const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
     assert.equal(result.status, 0, result.stderr)
     assert.equal(result.stdout.trim(), "", command)

@@ -169,12 +169,17 @@ function baseName(token: string): string {
   return token.split(/[/:]/).pop() ?? ""
 }
 
+// Quotes are shell syntax, not part of the path: '"config/.env"' names config/.env.
+function stripQuotes(token: string): string {
+  return token.replace(/^["']+/, "").replace(/["']+$/, "")
+}
+
 // An environment file is named when a token ends in ".env" or ".env.*".
 // The exact ".env.example" is the template, not a secret, and stays allowed.
 export function envPathMatch(command: string): string | null {
   for (const token of command.split(/\s+/)) {
     if (!token) continue
-    const base = baseName(token)
+    const base = baseName(stripQuotes(token))
     if (base === ".env.example") continue
     if (base === ".env" || base.startsWith(".env.")) return base
   }

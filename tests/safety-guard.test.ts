@@ -299,9 +299,18 @@ const ENV_BLOCKED_CASES: Array<[string, string]> = [
   [".env.local", "cat .env.local"],
   [".env.example.local", "cat .env.example.local"],
   [".env", "cp .env.example .env"],
+  // Quoted paths name the same file: the quotes are shell syntax, not part of the path.
+  [".env", 'cat ".env"'],
+  [".env", "cat '.env'"],
+  [".env", 'cat "config/.env"'],
 ]
 
-const ENV_ALLOWED_CASES = ["cat .env.example", "cat backup.env.example"]
+const ENV_ALLOWED_CASES = [
+  "cat .env.example",
+  "cat backup.env.example",
+  'cat ".env.example"',
+  'cat "backup.env.example"',
+]
 
 test("envPathMatch names the environment file a command reads", () => {
   for (const [label, command] of ENV_BLOCKED_CASES) {
