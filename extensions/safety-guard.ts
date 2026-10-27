@@ -172,6 +172,14 @@ function baseName(token: string): string {
 // Shell punctuation is syntax, not part of the path: "('.env')" names .env.
 const SHELL_PUNCTUATION = new Set(['"', "'", "`", ";", ",", "(", ")", "[", "]", "{", "}"])
 
+// Shell operators are token separators, not part of a path: "cat .env|tee" names .env.
+const ENV_TOKEN_SEPARATORS = /[\s|;&<>]+/
+
+// A trailing slash belongs to the path syntax, not to the name: "ls .env/" names .env.
+function trimTrailingSlash(token: string): string {
+  return token.replace(/\/+$/, "")
+}
+
 // Removes the leading and trailing shell punctuation of a name; its own dots stay.
 function trimShellPunctuation(token: string): string {
   let out = token
@@ -186,9 +194,9 @@ function trimShellPunctuation(token: string): string {
 // An environment file is named when a token ends in ".env" or ".env.*".
 // The exact ".env.example" is the template, not a secret, and stays allowed.
 export function envPathMatch(command: string): string | null {
-  for (const token of command.split(/\s+/)) {
+  for (const token of command.split(ENV_TOKEN_SEPARATORS)) {
     if (!token) continue
-    const base = trimShellPunctuation(baseName(token))
+    const base = trimShellPunctuation(baseName(trimTrailingSlash(trimShellPunctuation(token))))
     if (base === ".env.example") continue
     if (base === ".env" || base.startsWith(".env.")) return base
   }

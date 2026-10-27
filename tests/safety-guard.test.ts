@@ -311,6 +311,12 @@ const ENV_BLOCKED_CASES: Array<[string, string]> = [
   [".env", "('.env')"],
   // The dot of a backup name is part of the name: ".env.bak" is still an environment file.
   [".env.bak", "cat .env.bak"],
+  // A shell operator or a trailing slash still names the file: the operators separate
+  // tokens, so "cat .env|tee" names the same file as "cat .env".
+  [".env", "cat .env|tee"],
+  [".env", "cat .env&&echo"],
+  [".env", "cat .env>"],
+  [".env", "ls .env/"],
 ]
 
 const ENV_ALLOWED_CASES = [
@@ -351,6 +357,29 @@ const ENV_PATH_CASES: Array<[string | null, string]> = [
 
 test("envPathMatch names the environment file behind shell punctuation", () => {
   for (const [expected, command] of ENV_PATH_CASES) {
+    assert.equal(envPathMatch(command), expected, command)
+  }
+})
+
+// The acceptance cases of the operator rule: a shell operator or a trailing slash still
+// names the environment file, and the commands without them keep their labels.
+const ENV_OPERATOR_CASES: Array<[string | null, string]> = [
+  [".env", "cat .env|tee"],
+  [".env", "cat .env&&echo"],
+  [".env", "cat .env>"],
+  [".env", "ls .env/"],
+  [".env", "cat .env"],
+  [".env", "cat .env;"],
+  [".env", "(cat .env)"],
+  [".env.bak", "cat .env.bak"],
+  [null, "cat .env.example"],
+  [null, "cat backup.env.example"],
+  [null, "cat my.env"],
+  [null, "cat .envrc"],
+]
+
+test("envPathMatch names the environment file behind an operator or a trailing slash", () => {
+  for (const [expected, command] of ENV_OPERATOR_CASES) {
     assert.equal(envPathMatch(command), expected, command)
   }
 })

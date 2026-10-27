@@ -104,6 +104,11 @@ const CORPUS: string[] = [
   // names that only look like an environment file
   "cat my.env",
   "cat .envrc",
+  // a shell operator or a trailing slash still names the file
+  "cat .env|tee",
+  "cat .env&&echo",
+  "cat .env>",
+  "ls .env/",
 ]
 
 type Matcher = (command: string) => string | null
@@ -157,6 +162,13 @@ test("both hosts name the same file behind a punctuated path", () => {
   for (const command of ["cat my.env", "cat .envrc"]) {
     assert.equal(piEnvPathMatch(command), null, command)
     assert.equal(claudeEnvPathMatch(command), null, command)
+  }
+})
+
+test("both hosts name the same file behind an operator or a trailing slash", () => {
+  for (const command of ["cat .env|tee", "cat .env&&echo", "cat .env>", "ls .env/"]) {
+    assert.equal(piEnvPathMatch(command), ".env", command)
+    assert.equal(claudeEnvPathMatch(command), ".env", command)
   }
 })
 

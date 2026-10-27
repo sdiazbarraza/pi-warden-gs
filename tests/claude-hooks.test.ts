@@ -222,6 +222,11 @@ const ENV_CASES: Array<[string, string]> = [
   [".env", "('.env')"],
   // The dot of a backup name is part of the name: ".env.bak" is still an environment file.
   [".env.bak", "cat .env.bak"],
+  // A shell operator or a trailing slash still names the file.
+  [".env", "cat .env|tee"],
+  [".env", "cat .env&&echo"],
+  [".env", "cat .env>"],
+  [".env", "ls .env/"],
 ]
 
 for (const [label, command] of ENV_CASES) {
@@ -242,6 +247,32 @@ test("allows reading the example environment file", () => {
     "cat my.env",
     "cat .envrc",
   ]) {
+    const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.trim(), "", command)
+  }
+})
+
+test("blocks an environment file read behind an operator or a trailing slash", () => {
+  for (const command of ["cat .env|tee", "cat .env&&echo", "cat .env>", "ls .env/"]) {
+    const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(deniedReason(result.stdout), ENV_BLOCKED(".env"), command)
+  }
+})
+
+test("the unchanged environment file commands keep their labels", () => {
+  for (const [label, command] of [
+    [".env", "cat .env"],
+    [".env", "cat .env;"],
+    [".env", "(cat .env)"],
+    [".env.bak", "cat .env.bak"],
+  ] as Array<[string, string]>) {
+    const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(deniedReason(result.stdout), ENV_BLOCKED(label), command)
+  }
+  for (const command of ["cat .env.example", "cat backup.env.example", "cat my.env", "cat .envrc"]) {
     const result = runHook("safety-guard.mjs", payload({ tool_input: { command } }))
     assert.equal(result.status, 0, result.stderr)
     assert.equal(result.stdout.trim(), "", command)
