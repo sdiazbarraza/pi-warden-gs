@@ -267,6 +267,67 @@ test("keeps the .env.example exemption for --env-file path forms", () => {
   }
 })
 
+test("rejects .env reads inside shell control flow and command substitution", () => {
+  for (const line of [
+    "for f in .env; do cat $f; done",
+    "while read line; do echo $line; done < .env",
+    "until cat .env; do :; done",
+    "find . -name .env -exec cat {} \\;",
+    "xargs -a .env cat",
+    'eval "cat .env"',
+    "value=$(cat .env)",
+    "value=`cat .env`",
+  ]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /\.env file reads/, line)
+  }
+})
+
+test("rejects reader commands that expose .env contents", () => {
+  for (const cmd of ["strings", "od", "xxd", "hexdump -C", "openssl enc -in", "curl -s", "file", "ls", "bat", "tac", "fold -w 40"]) {
+    const result = run(VALID.replace("one line", `${cmd} .env`), FORCE, emptyRepo())
+    assert.equal(result.status, 2, cmd)
+    assert.match(result.stderr, /\.env file reads/, cmd)
+  }
+  const dd = run(VALID.replace("one line", "dd if=.env"), FORCE, emptyRepo())
+  assert.equal(dd.status, 2, "dd if=.env")
+  assert.match(dd.stderr, /\.env file reads/, "dd if=.env")
+})
+
+test("rejects nested delivery commands", () => {
+  for (const line of [
+    "bash -c git push origin main",
+    "sh -c 'git push origin main'",
+    'zsh -c "git push origin main"',
+    "bash -c 'gh pr create'",
+    "out=$(git push origin main)",
+    "out=`git push origin main`",
+  ]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /must not contain git push/, line)
+  }
+})
+
+test("strips a trailing shell comment before detection", () => {
+  for (const line of ["cat .env # never read the file", "cat .env # do not run this", "git push origin main # never", "bash -c git push # not allowed"]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+  }
+  const read = run(VALID.replace("one line", "cat .env # never read the file"), FORCE, emptyRepo())
+  assert.match(read.stderr, /\.env file reads/, "a comment must not mask a .env read")
+  const delivery = run(VALID.replace("one line", "git push origin main # never"), FORCE, emptyRepo())
+  assert.match(delivery.stderr, /must not contain git push/, "a comment must not mask a delivery command")
+})
+
+test("keeps comment-only and exempt lines passing", () => {
+  for (const line of ["echo done # nothing to read", "true # nothing to deliver", "cat .env.example # not the secret .env", "for f in .env.example; do cat $f; done"]) {
+    const ok = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(ok.status, 0, `${line}: ${ok.stderr}`)
+  }
+})
+
 test("fails open when the hook input cannot be parsed", () => {
   const result = spawnSync(SCRIPT, [], { input: "not json", encoding: "utf8", env: { ...process.env, ...FORCE } })
   assert.equal(result.status, 0, result.stderr)

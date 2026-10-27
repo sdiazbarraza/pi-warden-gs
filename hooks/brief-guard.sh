@@ -35,23 +35,29 @@ function trim(s) {
   gsub(/[ \t]+/, " ", s)
   return s
 }
-function isread(line,   t) {
-  t = trim(line)
-  if (t ~ /^[.][[:space:]]/) return 1
-  if (t ~ ("^(" wrap ")?" readers "[[:space:]]")) return 1
-  if (t ~ /<[[:space:]]*\.env/) return 1
-  if (t ~ /--env-file([[:space:]]+|=)?([^[:space:]]*\/)?\.env/) return 1
-  return 0
-}
-# envbad: one command segment reads a .env file. The .env.example exemption applies to a
-# basename that is exactly ".env.example": the left anchor rejects a preceding "." or "-",
-# so "foo..env.example" and "backup.env.example" stay reads, and only the exempt token is
+# envref: the text names a .env file. The .env.example exemption applies to a basename
+# that is exactly ".env.example": the left anchor rejects a preceding "." or "-", so
+# "foo..env.example" and "backup.env.example" stay reads, and only the exempt token is
 # removed, so "cp .env.example .env" still reads .env.
-function envbad(seg,   t) {
-  if (!isread(seg)) return 0
-  t = seg
+function envref(t) {
   gsub(/(^|[^A-Za-z0-9_.-])\.env\.example([^A-Za-z0-9_.-]|$)/, " ", t)
   return t ~ /\.env([^A-Za-z0-9_]|$)/
+}
+# isread: the text reads file contents through a reader command, a control-flow word list
+# ("for f in .env" names a file with no reader command at all), a redirect or an env-file
+# flag. head lets the reader sit behind a wrapper, a nested shell, eval or find -exec.
+function isread(s) {
+  if (s ~ /^[.][[:space:]]/) return 1
+  if (s ~ ("^" head readers "([[:space:]]|$)")) return 1
+  if (s ~ /<[[:space:]]*\.env/) return 1
+  if (s ~ /--env-file([[:space:]]+|=)?([^[:space:]]*\/)?\.env/) return 1
+  if (s ~ /(^|[[:space:]])(for|while|until)[[:space:]]/ && s ~ /(^|[[:space:]])in([[:space:]]|$)/) return 1
+  return 0
+}
+# envbad: the text reads a .env file.
+function envbad(s) {
+  if (!isread(s)) return 0
+  return envref(s)
 }
 # hasneg: the segment is itself a prohibition (imperative list or copula prose), so it names
 # delivery or .env reads without performing them.
@@ -60,15 +66,30 @@ function hasneg(s) {
   if (s ~ /(is|are|was|were|being|remains|stays|must|should|shall)[[:space:]]+(be[[:space:]]+)?(not[[:space:]]+)?(forbidden|prohibited|blocked|disallowed|avoided|not[[:space:]]+allowed)/) return 1
   return 0
 }
-# segbad: negation is per command segment, so "never push; cat .env" still reads .env.
-function segbad(line,   n, parts, i, s) {
-  n = split(line, parts, /[;&|]/)
+# segbad: every command the line runs. Negation is per command segment, so
+# "never push; cat .env" still reads .env.
+function segbad(line,   n, parts, i, s, whole) {
+  # A trailing shell comment must not mask a read or a delivery command, and quoting is
+  # noise for these patterns.
+  whole = line
+  sub(/(^|[[:space:]])#.*$/, "", whole)
+  gsub("[" dq sq bt "]", "", whole)
+  whole = trim(whole)
+  if (whole != "" && !hasneg(whole) && envbad(whole)) envread = 1
+  # ; & | and command substitution (backticks or $( )) each start a new command, so a
+  # nested command is inspected on its own.
+  n = split(line, parts, /[;&|]|[`]|[$][(]/)
   for (i = 1; i <= n; i++) {
-    s = trim(parts[i])
+    s = parts[i]
+    sub(/(^|[[:space:]])#.*$/, "", s)
+    gsub("[" dq sq bt "]", "", s)
+    # a trailing ")" closes a substitution or a subshell around this command
+    sub(/[)]+$/, "", s)
+    s = trim(s)
     if (s == "") continue
     if (hasneg(s)) continue
-    if (s ~ (cmdpre "(" wrap ")?" "git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)")) delivery = 1
-    if (s ~ (cmdpre "(" wrap ")?" "gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)")) delivery = 1
+    if (s ~ ("^" head "git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)")) delivery = 1
+    if (s ~ ("^" head "gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)")) delivery = 1
     if (envbad(s)) envread = 1
   }
 }
@@ -76,11 +97,19 @@ BEGIN {
   list = "Objective|Preconditions|Steps|Allowed edit surfaces|Verification|Acceptance criteria|Architecture constraints|Report"
   n = split(list, req, "|")
   for (i = 1; i <= n; i++) idx[req[i]] = i
-  # A command can sit behind a wrapper (sudo, env, xargs, ...) that carries its own
-  # arguments, so the wrapper prefix is allowed before git/gh and before a reader command.
-  wrap = "(sudo|env|command|nohup|nice|time|xargs|doas)([[:space:]]+[^[:space:]]+)*[[:space:]]+"
-  readers = "(cat|source|grep|egrep|fgrep|sed|awk|perl|python3?|node|bash|sh|zsh|cp|mv|ln|less|more|head|tail|read|jq|diff|cmp|sort|uniq|wc|tee|cut|tr|env|dotenv|export|realpath|stat)"
-  cmdpre = "(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*"
+  # A command can sit behind a wrapper (sudo, env, xargs, ...), a control-flow keyword,
+  # a nested shell (-c), eval/exec or find -exec; each carries its own arguments and the
+  # alternatives nest, so sudo plus bash -c plus git push is still one command.
+  nest = "(sudo|env|command|nohup|nice|time|xargs|doas)([[:space:]]+[^[:space:]]+)*[[:space:]]+"
+  nest = nest "|(then|do|else|if|elif|while|until)([[:space:]]+)"
+  nest = nest "|(bash|sh|zsh|dash|eval|exec)([[:space:]]+-[^[:space:]]+)*[[:space:]]+"
+  nest = nest "|find([[:space:]]+[^[:space:]]+)*[[:space:]]+-exec[[:space:]]+"
+  head = "(" nest ")*"
+  # Readers expose file contents with or without a dedicated "read" verb.
+  readers = "(cat|source|grep|egrep|fgrep|sed|awk|perl|python3?|node|bash|sh|zsh|cp|mv|ln|less|more|head|tail|read|jq|diff|cmp|sort|uniq|wc|tee|cut|tr|env|dotenv|export|realpath|stat"
+  readers = readers "|strings|dd|od|xxd|hexdump|openssl|curl|file|ls|bat|tac|rev|nl|column|paste|join|comm|split|csplit|shuf|fold|fmt)"
+  # Quoting characters are built from codes so this program stays inside single quotes.
+  dq = sprintf("%c", 34); sq = sprintf("%c", 39); bt = sprintf("%c", 96)
 }
 {
   raw = raw $0 "\n"
