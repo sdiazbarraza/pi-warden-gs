@@ -11,13 +11,16 @@
 //    docker queries stay allowed. Fail-closed.
 // 3. Bash: delivery commands (git push, gh pr create|merge|edit) run only inside
 //    gentle-ai-publisher. Everywhere else they are blocked. Fail-closed.
-// 4. Agent: gentle-ai-brief-review must run in the foreground with the brief inline between
+// 4. Bash: a command that names an environment file (".env" or ".env.*", except the
+//    exact ".env.example") is blocked everywhere, publisher included: environment
+//    files hold secrets. Fail-closed.
+// 5. Agent: gentle-ai-brief-review must run in the foreground with the brief inline between
 //    a line `<<<BRIEF` and a line `BRIEF>>>` (exactly one pair), and the brief must not carry
 //    a `VERDICT:` line.
-// 5. Agent: gentle-ai-worker and gentle-ai-worker-infra need an approved brief — the brief
+// 6. Agent: gentle-ai-worker and gentle-ai-worker-infra need an approved brief — the brief
 //    must pass the structural contract of hooks/brief-guard.sh and the sha256 of the
 //    normalized brief must hold an unused approval for this session. Fail-closed.
-// 6. SendMessage: new instructions to a writer task are blocked.
+// 7. SendMessage: new instructions to a writer task are blocked.
 //
 // The matching logic is a port of the Pi extension, not a rewrite: the labels and the
 // patterns are identical, and tests/claude-differential.test.ts runs the same corpus through
@@ -144,6 +147,55 @@ export function deliveryMatch(command) {
   return null
 }
 
+/** The basename of a token: the last component after the "/" and ":" separators. */
+function baseName(token) {
+  return token.split(/[/:]/).pop() ?? ""
+}
+
+/** Shell punctuation is syntax, not part of the path: "('.env')" names .env. */
+const SHELL_PUNCTUATION = new Set(['"', "'", "`", ";", ",", "(", ")", "[", "]", "{", "}"])
+
+/** Shell operators are token separators, not part of a path: "cat .env|tee" names .env. */
+const ENV_TOKEN_SEPARATORS = /[\s|;&<>]+/
+
+/** A trailing slash belongs to the path syntax, not to the name: "ls .env/" names .env. */
+function trimTrailingSlash(token) {
+  return token.replace(/\/+$/, "")
+}
+
+/** Removes the leading and trailing shell punctuation of a name; its own dots stay. */
+function trimShellPunctuation(token) {
+  let out = token
+  for (;;) {
+    const first = out.length > 0 && SHELL_PUNCTUATION.has(out[0]) ? 1 : 0
+    const last = out.length > 0 && SHELL_PUNCTUATION.has(out[out.length - 1]) ? out.length - 1 : out.length
+    if (first === 0 && last === out.length) return out
+    out = out.slice(first, last)
+  }
+}
+
+/** Quotes are shell syntax, not part of the path: "cat .e''nv" names .env. */
+function removeQuotes(token) {
+  return token.replace(/["']/g, "")
+}
+
+/**
+ * The name of the environment file the command reads, or null.
+ * A token ending in ".env" or ".env.*" names one; the exact ".env.example"
+ * is the template, not a secret, and stays allowed.
+ * The rule matches a literal path: the quotes inside a token are removed before
+ * the name is compared, and a path assembled by shell expansion is not detected.
+ */
+export function envPathMatch(command) {
+  for (const token of String(command ?? "").split(ENV_TOKEN_SEPARATORS)) {
+    if (!token) continue
+    const base = trimShellPunctuation(baseName(trimTrailingSlash(trimShellPunctuation(removeQuotes(token)))))
+    if (base === ".env.example") continue
+    if (base === ".env" || base.startsWith(".env.")) return base
+  }
+  return null
+}
+
 // --- messages (the Pi wording, kept verbatim) ------------------------------
 
 export const destructiveBlocked = (label) =>
@@ -152,6 +204,8 @@ export const heavyBlocked = (label) =>
   `safety-guard: "${label}" runs only in a subagent. Delegate it to gentle-ai-runner (commands only) or gentle-ai-worker-infra (when it also edits files). If they are unavailable, stop and tell the human instead of running it here.`
 export const deliveryBlocked = (label) =>
   `safety-guard: "${label}" runs only inside gentle-ai-publisher. Delegate the exact git/gh commands to gentle-ai-publisher (mode "task") with the human's authorization.`
+export const envBlocked = (label) =>
+  `safety-guard: "${label}" is blocked. Environment files hold secrets and must not be read by an agent. If the human explicitly authorized it, ask them to run it themselves.`
 export const NOT_APPROVED =
   'safety-guard: brief not approved. Run gentle-ai-brief-review with mode "task" and this exact text between <<<BRIEF and BRIEF>>>, then relaunch the identical text. Approvals are single-use.'
 export const WRITER_FOLLOWUP =
@@ -290,6 +344,18 @@ function handleBash(payload) {
       deny(`safety-guard: internal error (${errMessage(err)}); command check blocked (fail-closed).`)
       return
     }
+  }
+
+  // Environment files hold secrets: blocked everywhere, publisher included.
+  try {
+    const label = envPathMatch(command)
+    if (label) {
+      deny(envBlocked(label))
+      return
+    }
+  } catch (err) {
+    deny(`safety-guard: internal error (${errMessage(err)}); command check blocked (fail-closed).`)
+    return
   }
 
   if (agentType === PUBLISHER) return

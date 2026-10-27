@@ -21,7 +21,10 @@
 //    gh pr create|merge|edit) run only inside gentle-ai-publisher, recognized as
 //    a gentle-pi child (GENTLE_PI_AGENTS_CHILD=1) whose appended system prompt
 //    carries PUBLISHER_MARKER. Everywhere else they are blocked (fail-closed).
-// 5. bash / bash_background / monitor: builds, test runs and container runs
+// 5. bash / bash_background / monitor: a command that names an environment file
+//    (".env" or ".env.*", except the exact ".env.example") is blocked everywhere,
+//    publisher included: environment files hold secrets.
+// 6. bash / bash_background / monitor: builds, test runs and container runs
 //    (dotnet-in-docker.sh, docker run|build|exec, docker compose up|run|build|exec)
 //    run only in a gentle-pi child (GENTLE_PI_AGENTS_CHILD=1); the orchestrator must
 //    delegate them. Read-only docker queries stay allowed (fail-closed).
@@ -161,6 +164,52 @@ export function deliveryMatch(command: string): string | null {
   return null
 }
 
+// The basename of a token: the last component after the "/" and ":" separators.
+function baseName(token: string): string {
+  return token.split(/[/:]/).pop() ?? ""
+}
+
+// Shell punctuation is syntax, not part of the path: "('.env')" names .env.
+const SHELL_PUNCTUATION = new Set(['"', "'", "`", ";", ",", "(", ")", "[", "]", "{", "}"])
+
+// Shell operators are token separators, not part of a path: "cat .env|tee" names .env.
+const ENV_TOKEN_SEPARATORS = /[\s|;&<>]+/
+
+// A trailing slash belongs to the path syntax, not to the name: "ls .env/" names .env.
+function trimTrailingSlash(token: string): string {
+  return token.replace(/\/+$/, "")
+}
+
+// Removes the leading and trailing shell punctuation of a name; its own dots stay.
+function trimShellPunctuation(token: string): string {
+  let out = token
+  for (;;) {
+    const first = out.length > 0 && SHELL_PUNCTUATION.has(out[0]) ? 1 : 0
+    const last = out.length > 0 && SHELL_PUNCTUATION.has(out[out.length - 1]) ? out.length - 1 : out.length
+    if (first === 0 && last === out.length) return out
+    out = out.slice(first, last)
+  }
+}
+
+// Quotes are shell syntax, not part of the path: "cat .e''nv" names .env.
+function removeQuotes(token: string): string {
+  return token.replace(/["']/g, "")
+}
+
+// An environment file is named when a token ends in ".env" or ".env.*".
+// The exact ".env.example" is the template, not a secret, and stays allowed.
+// The rule matches a literal path: the quotes inside a token are removed before
+// the name is compared, and a path assembled by shell expansion is not detected.
+export function envPathMatch(command: string): string | null {
+  for (const token of command.split(ENV_TOKEN_SEPARATORS)) {
+    if (!token) continue
+    const base = trimShellPunctuation(baseName(trimTrailingSlash(trimShellPunctuation(removeQuotes(token)))))
+    if (base === ".env.example") continue
+    if (base === ".env" || base.startsWith(".env.")) return base
+  }
+  return null
+}
+
 // True only in a gentle-pi child whose appended system prompt (inline or a file path) has the publisher marker.
 export function isPublisherProcess(env: Record<string, string | undefined>, argv: string[]): boolean {
   if (env.GENTLE_PI_AGENTS_CHILD !== "1") return false
@@ -180,6 +229,9 @@ export function isPublisherProcess(env: Record<string, string | undefined>, argv
 
 const DELIVERY_BLOCKED = (label: string) =>
   `safety-guard: "${label}" runs only inside gentle-ai-publisher. Delegate the exact git/gh commands to gentle-ai-publisher (mode "task") with the human's authorization.`
+
+const ENV_BLOCKED = (label: string) =>
+  `safety-guard: "${label}" is blocked. Environment files hold secrets and must not be read by an agent. If the human explicitly authorized it, ask them to run it themselves.`
 
 export function normalizeBrief(text: string): string {
   return text.replace(/\r\n/g, "\n").trim()
@@ -368,6 +420,13 @@ export default function (
         } catch (err) {
           return { block: true, reason: `safety-guard: internal error (${errMessage(err)}); command check blocked (fail-closed).` }
         }
+      }
+      // Environment files hold secrets: blocked everywhere, publisher included.
+      try {
+        const label = envPathMatch(command)
+        if (label) return { block: true, reason: ENV_BLOCKED(label) }
+      } catch (err) {
+        return { block: true, reason: `safety-guard: internal error (${errMessage(err)}); command check blocked (fail-closed).` }
       }
       if (publisher) return
       try {

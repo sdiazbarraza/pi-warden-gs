@@ -9,12 +9,14 @@ import {
   destructiveMatch as piDestructiveMatch,
   heavyMatch as piHeavyMatch,
   deliveryMatch as piDeliveryMatch,
+  envPathMatch as piEnvPathMatch,
 } from "../extensions/safety-guard.ts"
 
 import {
   destructiveMatch as claudeDestructiveMatch,
   heavyMatch as claudeHeavyMatch,
   deliveryMatch as claudeDeliveryMatch,
+  envPathMatch as claudeEnvPathMatch,
 } from "../claude/hooks/safety-guard.mjs"
 
 const CORPUS: string[] = [
@@ -74,6 +76,42 @@ const CORPUS: string[] = [
   "grep -n docker <<'EOF'\ndocker rm -f x\nEOF",
   "bash <<'EOF'\nsudo rm -rf /\nEOF",
   "cat <<'EOF' | bash\nsudo rm -rf /\nEOF",
+  // environment files
+  "cat .env",
+  "cat config/.env",
+  "busybox cat .env",
+  "git show HEAD:.env",
+  "git diff -- .env",
+  "cat .env.local",
+  "cat .env.example.local",
+  "cp .env.example .env",
+  "cat .env.example",
+  "cat backup.env.example",
+  // quoted paths name the same file
+  'cat ".env"',
+  "cat '.env'",
+  'cat "config/.env"',
+  'cat ".env.example"',
+  'cat "backup.env.example"',
+  // a punctuated path names the same file
+  "cat .env;",
+  "(cat .env)",
+  "cat .env)",
+  "cat .env,",
+  "('.env')",
+  // the dot of a backup name is part of the name
+  "cat .env.bak",
+  // names that only look like an environment file
+  "cat my.env",
+  "cat .envrc",
+  // a shell operator or a trailing slash still names the file
+  "cat .env|tee",
+  "cat .env&&echo",
+  "cat .env>",
+  "ls .env/",
+  // the quotes inside a token are removed before the name is compared
+  "cat .e''nv",
+  'cat .e""nv',
 ]
 
 type Matcher = (command: string) => string | null
@@ -100,6 +138,52 @@ test("heavy commands match identically in both implementations", () => {
 
 test("delivery commands match identically in both implementations", () => {
   compare("deliveryMatch", piDeliveryMatch, claudeDeliveryMatch)
+})
+
+test("environment file commands match identically in both implementations", () => {
+  compare("envPathMatch", piEnvPathMatch, claudeEnvPathMatch)
+})
+
+test("the corpus covers the quoted environment file commands", () => {
+  for (const command of ['cat ".env"', "cat '.env'", 'cat "config/.env"']) {
+    assert.equal(piEnvPathMatch(command), ".env", command)
+    assert.equal(claudeEnvPathMatch(command), ".env", command)
+  }
+  for (const command of ['cat ".env.example"', 'cat "backup.env.example"']) {
+    assert.equal(piEnvPathMatch(command), null, command)
+    assert.equal(claudeEnvPathMatch(command), null, command)
+  }
+})
+
+test("both hosts name the same file behind a punctuated path", () => {
+  for (const command of ["cat .env;", "(cat .env)", "cat .env)", "cat .env,", "('.env')"]) {
+    assert.equal(piEnvPathMatch(command), ".env", command)
+    assert.equal(claudeEnvPathMatch(command), ".env", command)
+  }
+  assert.equal(piEnvPathMatch("cat .env.bak"), ".env.bak")
+  assert.equal(claudeEnvPathMatch("cat .env.bak"), ".env.bak")
+  for (const command of ["cat my.env", "cat .envrc"]) {
+    assert.equal(piEnvPathMatch(command), null, command)
+    assert.equal(claudeEnvPathMatch(command), null, command)
+  }
+})
+
+test("both hosts name the same file behind an operator or a trailing slash", () => {
+  for (const command of ["cat .env|tee", "cat .env&&echo", "cat .env>", "ls .env/"]) {
+    assert.equal(piEnvPathMatch(command), ".env", command)
+    assert.equal(claudeEnvPathMatch(command), ".env", command)
+  }
+})
+
+test("both hosts name the same file behind quotes inside a token", () => {
+  for (const command of ["cat .e''nv", 'cat .e""nv']) {
+    assert.equal(piEnvPathMatch(command), ".env", command)
+    assert.equal(claudeEnvPathMatch(command), ".env", command)
+  }
+  for (const command of ["cat .env.example", "cat backup.env.example", "cat my.env", "cat .envrc"]) {
+    assert.equal(piEnvPathMatch(command), null, command)
+    assert.equal(claudeEnvPathMatch(command), null, command)
+  }
 })
 
 test("the corpus keeps covering every destructive label", () => {

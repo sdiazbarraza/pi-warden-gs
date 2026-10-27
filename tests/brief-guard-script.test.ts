@@ -71,14 +71,6 @@ test("ignores non-writer agents even when the check is forced", () => {
 
 const FORCE = { BRIEF_GUARD_FORCE_STRUCTURE: "1" }
 
-test("rejects every delivery-command form a brief can carry", () => {
-  for (const line of ["git -C /repo push origin main", "git  push origin main", "gh -R o/r pr create", "gh pr  merge 1"]) {
-    const result = run(VALID.replace("one line", `then ${line}`), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /must not contain git push/)
-  }
-})
-
 test("accepts Preconditions that label branch\/HEAD with capitals", () => {
   const brief = VALID.replace(
     "On expected branch feat/example; HEAD is that tip; tree is clean (git status --short).",
@@ -95,12 +87,6 @@ test("rejects edit surfaces with traversal or broad globs", () => {
   }
 })
 
-test("rejects git -c forms of push", () => {
-  const result = run(VALID.replace("one line", "then git -c core.hooksPath=/tmp push origin main"), FORCE, emptyRepo())
-  assert.equal(result.status, 2)
-  assert.match(result.stderr, /must not contain git push/)
-})
-
 test("rejects quoted export command substitution in Verification", () => {
   const brief = VALID.replace(
     "node --test tests/brief-guard-script.test.ts",
@@ -109,82 +95,6 @@ test("rejects quoted export command substitution in Verification", () => {
   const result = run(brief, FORCE, emptyRepo())
   assert.equal(result.status, 2)
   assert.match(result.stderr, /must not hide failures/)
-})
-
-test("allows .env.example and rejects .env.local reads", () => {
-  const ok = run(VALID.replace("one line", "cat .env.example"), FORCE, emptyRepo())
-  assert.equal(ok.status, 0, ok.stderr)
-  const quoted = run(VALID.replace("one line", "cat '.env.example'"), FORCE, emptyRepo())
-  assert.equal(quoted.status, 0, quoted.stderr)
-  const bad = run(VALID.replace("one line", "cat .env.local"), FORCE, emptyRepo())
-  assert.equal(bad.status, 2)
-  assert.match(bad.stderr, /\.env file reads/)
-})
-
-test("flags .env.example.local reads", () => {
-  const bad = run(VALID.replace("one line", "cat .env.example.local"), FORCE, emptyRepo())
-  assert.equal(bad.status, 2)
-  assert.match(bad.stderr, /\.env file reads/)
-})
-
-test("flags non-exact env names like backup.env.example", () => {
-  const bad = run(VALID.replace("one line", "cat backup.env.example"), FORCE, emptyRepo())
-  assert.equal(bad.status, 2)
-  assert.match(bad.stderr, /\.env file reads/)
-})
-
-test("flags a lookalike whose name only ends with .env.example", () => {
-  const bad = run(VALID.replace("one line", "cat foo..env.example"), FORCE, emptyRepo())
-  assert.equal(bad.status, 2)
-  assert.match(bad.stderr, /\.env file reads/)
-})
-
-test("exempts .env.example per command, not per whole line", () => {
-  for (const line of ["cat .env.example; cat .env", "cat .env.example | cat .env", "cat .env.example && cat .env"]) {
-    const bad = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(bad.status, 2, line)
-    assert.match(bad.stderr, /\.env file reads/, line)
-  }
-  // Only the .env.example token is exempt, so a second .env operand in the same command stays a read.
-  const sibling = run(VALID.replace("one line", "cp .env.example .env"), FORCE, emptyRepo())
-  assert.equal(sibling.status, 2)
-  assert.match(sibling.stderr, /\.env file reads/)
-  const ok = run(VALID.replace("one line", "cat .env.example; echo done"), FORCE, emptyRepo())
-  assert.equal(ok.status, 0, ok.stderr)
-})
-
-test("allows copula prohibition prose for delivery commands", () => {
-  for (const line of [
-    "git push is forbidden",
-    "git push should be avoided",
-    "git push must not be allowed",
-    "git push remains prohibited",
-    "gh pr edit was avoided",
-  ]) {
-    const ok = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(ok.status, 0, `${line}: ${ok.stderr}`)
-  }
-})
-
-test("keeps real delivery commands blocked when prohibition prose appears elsewhere", () => {
-  const brief = VALID.replace("one line", "git push should be avoided\nthen git push origin main")
-  const bad = run(brief, FORCE, emptyRepo())
-  assert.equal(bad.status, 2)
-  assert.match(bad.stderr, /must not contain git push/)
-})
-
-test("allows prose mentions of env files and unrelated .environment", () => {
-  const ok1 = run(VALID.replace("one line", "must not read .env"), FORCE, emptyRepo())
-  assert.equal(ok1.status, 0, ok1.stderr)
-  const ok2 = run(VALID.replace("one line", "update .environment config"), FORCE, emptyRepo())
-  assert.equal(ok2.status, 0, ok2.stderr)
-})
-
-test("allows prose delivery mentions", () => {
-  const ok = run(VALID.replace("one line", "do not run git push"), FORCE, emptyRepo())
-  assert.equal(ok.status, 0, ok.stderr)
-  const ok2 = run(VALID.replace("one line", "git push is forbidden"), FORCE, emptyRepo())
-  assert.equal(ok2.status, 0, ok2.stderr)
 })
 
 test("measures size on LF-normalized bytes", () => {
@@ -205,129 +115,6 @@ test("rejects a 3072-byte brief that ends in a newline", () => {
   assert.equal(run(brief, FORCE, emptyRepo()).status, 2, "trailing newline must not lower the size")
 })
 
-const WRAPPERS = ["sudo", "env", "command", "nohup", "nice", "time", "xargs", "doas"]
-
-test("rejects delivery commands and env reads behind wrapper prefixes", () => {
-  for (const wrapper of WRAPPERS) {
-    for (const line of ["git push origin main", "gh pr create", "cat .env"]) {
-      const result = run(VALID.replace("one line", `${wrapper} ${line}`), FORCE, emptyRepo())
-      assert.equal(result.status, 2, `${wrapper} ${line}`)
-      assert.match(result.stderr, /must not contain git push/, `${wrapper} ${line}`)
-    }
-  }
-})
-
-test("rejects wrapper prefixes that carry their own arguments", () => {
-  for (const line of ["sudo -u root git push origin main", "nice -n 5 gh pr merge 1", "xargs -0 cat .env"]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /must not contain git push/, line)
-  }
-})
-
-test("applies negation per command segment, not per line", () => {
-  for (const line of [
-    "never push; cat .env",
-    "do not push; gh pr create",
-    "git push should be avoided && cat .env",
-    "must not read .env; git push origin main",
-    "never push | gh pr edit 1",
-  ]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /must not contain git push/, line)
-  }
-})
-
-test("keeps a lone negated segment allowed", () => {
-  for (const line of ["never push", "do not push"]) {
-    const ok = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(ok.status, 0, `${line}: ${ok.stderr}`)
-  }
-})
-
-test("rejects --env-file forms with a path before .env", () => {
-  for (const line of [
-    "--env-file=./.env",
-    "--env-file config/.env",
-    "--env-file=config/.env",
-    "dotenv --env-file=config/.env",
-    "env --env-file ./.env",
-  ]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /\.env file reads/, line)
-  }
-})
-
-test("keeps the .env.example exemption for --env-file path forms", () => {
-  for (const line of ["--env-file=./.env.example", "cat .env.example"]) {
-    const ok = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(ok.status, 0, `${line}: ${ok.stderr}`)
-  }
-})
-
-test("rejects .env reads inside shell control flow and command substitution", () => {
-  for (const line of [
-    "for f in .env; do cat $f; done",
-    "while read line; do echo $line; done < .env",
-    "until cat .env; do :; done",
-    "find . -name .env -exec cat {} \\;",
-    "xargs -a .env cat",
-    'eval "cat .env"',
-    "value=$(cat .env)",
-    "value=`cat .env`",
-  ]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /\.env file reads/, line)
-  }
-})
-
-test("rejects reader commands that expose .env contents", () => {
-  for (const cmd of ["strings", "od", "xxd", "hexdump -C", "openssl enc -in", "curl -s", "file", "ls", "bat", "tac", "fold -w 40"]) {
-    const result = run(VALID.replace("one line", `${cmd} .env`), FORCE, emptyRepo())
-    assert.equal(result.status, 2, cmd)
-    assert.match(result.stderr, /\.env file reads/, cmd)
-  }
-  const dd = run(VALID.replace("one line", "dd if=.env"), FORCE, emptyRepo())
-  assert.equal(dd.status, 2, "dd if=.env")
-  assert.match(dd.stderr, /\.env file reads/, "dd if=.env")
-})
-
-test("rejects nested delivery commands", () => {
-  for (const line of [
-    "bash -c git push origin main",
-    "sh -c 'git push origin main'",
-    'zsh -c "git push origin main"',
-    "bash -c 'gh pr create'",
-    "out=$(git push origin main)",
-    "out=`git push origin main`",
-  ]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /must not contain git push/, line)
-  }
-})
-
-test("strips a trailing shell comment before detection", () => {
-  for (const line of ["cat .env # never read the file", "cat .env # do not run this", "git push origin main # never", "bash -c git push # not allowed"]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-  }
-  const read = run(VALID.replace("one line", "cat .env # never read the file"), FORCE, emptyRepo())
-  assert.match(read.stderr, /\.env file reads/, "a comment must not mask a .env read")
-  const delivery = run(VALID.replace("one line", "git push origin main # never"), FORCE, emptyRepo())
-  assert.match(delivery.stderr, /must not contain git push/, "a comment must not mask a delivery command")
-})
-
-test("keeps comment-only and exempt lines passing", () => {
-  for (const line of ["echo done # nothing to read", "true # nothing to deliver", "cat .env.example # not the secret .env", "for f in .env.example; do cat $f; done"]) {
-    const ok = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(ok.status, 0, `${line}: ${ok.stderr}`)
-  }
-})
-
 test("fails open when the hook input cannot be parsed", () => {
   const result = spawnSync(SCRIPT, [], { input: "not json", encoding: "utf8", env: { ...process.env, ...FORCE } })
   assert.equal(result.status, 0, result.stderr)
@@ -341,60 +128,4 @@ test("keeps the repository trigger when no caller forces the check", () => {
   assert.equal(run(malformed, {}, cwd).status, 0, "no AGENTS.md trigger means no structural check")
   writeFileSync(join(cwd, "AGENTS.md"), "### Brief del subagente\n")
   assert.equal(run(malformed, {}, cwd).status, 2, "the repository trigger still applies")
-})
-
-test("rejects delivery commands and env reads behind path prefixes", () => {
-  for (const line of [
-    "/usr/bin/git push origin main",
-    "/bin/cat .env",
-    "/usr/local/bin/gh pr create",
-    "../git push origin main",
-    "./cat .env",
-  ]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /must not contain git push/, line)
-  }
-})
-
-test("rejects shell assignment prefixes before a command", () => {
-  for (const line of ["TOKEN=x cat .env", "CI=1 git push", "FOO=1 cat .env", "A=1 B=2 gh pr create", 'TOKEN="x" cat .env']) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /must not contain git push/, line)
-  }
-})
-
-test("keeps unquoted and single-token quoted assignment prefixes rejected", () => {
-  for (const line of ["TOKEN=x cat .env", 'TOKEN="x" git push', "A=1 B=2 cat .env"]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /must not contain git push/, line)
-  }
-})
-
-test("rejects quoted assignment prefixes whose value contains a space", () => {
-  for (const line of ['TOKEN="x y" cat .env', 'CI="blue green" git push', "TOKEN='x y' cat .env"]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /must not contain git push/, line)
-  }
-})
-
-test("rejects timeout-wrapped commands", () => {
-  for (const line of ["timeout git push", "timeout 5 git push origin main", "timeout 10 cat .env", "timeout -s KILL 5 gh pr create"]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /must not contain git push/, line)
-  }
-})
-
-test("rejects rg reads of .env and keeps the .env.example exemption", () => {
-  for (const line of ["rg secret .env", "rg -n secret .env", "rg --files-with-matches secret .env"]) {
-    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
-    assert.equal(result.status, 2, line)
-    assert.match(result.stderr, /\.env file reads/, line)
-  }
-  const ok = run(VALID.replace("one line", "rg secret .env.example"), FORCE, emptyRepo())
-  assert.equal(ok.status, 0, ok.stderr)
 })

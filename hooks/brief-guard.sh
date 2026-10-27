@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # brief-guard: PreToolUse hook on the Agent tool, also invoked by the Pi safety-guard.
-# Blocks a writer launch (gentle-ai-worker, gentle-ai-worker-infra) whose brief
-# misses the sections required by the repository AGENTS.md.
+# Validates the structure of a writer launch (gentle-ai-worker, gentle-ai-worker-infra)
+# brief: the sections required by the repository AGENTS.md, present, non-empty and in
+# order, plus the size, Steps, Preconditions, Allowed edit surfaces and Verification
+# rules. Command-level prohibitions (push commands and .env reads) are enforced at
+# execution time by the host safety guard, not here.
 # Active in repositories whose AGENTS.md defines "### Brief del subagente", and in any
 # repository when the caller sets BRIEF_GUARD_FORCE_STRUCTURE=1 (the Pi path, where the
 # global override defines the brief contract for every project).
@@ -29,106 +32,10 @@ brief=$(printf '%s' "$brief" | tr -d '\r')
 bytes=$(jq -j '.tool_input.prompt // empty' <<<"$input" 2>/dev/null | tr -d '\r' | wc -c | tr -d '[:space:]') || exit 0
 
 problems=$(printf '%s' "$brief" | awk -v bytes="$bytes" '
-function trim(s) {
-  sub(/^[[:space:]]+/, "", s)
-  sub(/[[:space:]]+$/, "", s)
-  gsub(/[ \t]+/, " ", s)
-  return s
-}
-# envref: the text names a .env file. The .env.example exemption applies to a basename
-# that is exactly ".env.example": the left anchor rejects a preceding "." or "-", so
-# "foo..env.example" and "backup.env.example" stay reads, and only the exempt token is
-# removed, so "cp .env.example .env" still reads .env.
-function envref(t) {
-  gsub(/(^|[^A-Za-z0-9_.-])\.env\.example([^A-Za-z0-9_.-]|$)/, " ", t)
-  return t ~ /\.env([^A-Za-z0-9_]|$)/
-}
-# isread: the text reads file contents through a reader command, a control-flow word list
-# ("for f in .env" names a file with no reader command at all), a redirect or an env-file
-# flag. head lets the reader sit behind a wrapper, a nested shell, eval or find -exec.
-function isread(s) {
-  if (s ~ /^[.][[:space:]]/) return 1
-  if (s ~ ("^" head readers "([[:space:]]|$)")) return 1
-  if (s ~ /<[[:space:]]*\.env/) return 1
-  if (s ~ /--env-file([[:space:]]+|=)?([^[:space:]]*\/)?\.env/) return 1
-  if (s ~ /(^|[[:space:]])(for|while|until)[[:space:]]/ && s ~ /(^|[[:space:]])in([[:space:]]|$)/) return 1
-  return 0
-}
-# envbad: the text reads a .env file.
-function envbad(s) {
-  if (!isread(s)) return 0
-  return envref(s)
-}
-# hasneg: the segment is itself a prohibition (imperative list or copula prose), so it names
-# delivery or .env reads without performing them.
-function hasneg(s) {
-  if (s ~ /(^|[^A-Za-z0-9_])(do[[:space:]]+not|must[[:space:]]+not|never|avoid|without|should[[:space:]]+not)[[:space:]]/) return 1
-  if (s ~ /(is|are|was|were|being|remains|stays|must|should|shall)[[:space:]]+(be[[:space:]]+)?(not[[:space:]]+)?(forbidden|prohibited|blocked|disallowed|avoided|not[[:space:]]+allowed)/) return 1
-  return 0
-}
-# stripassign: drop leading shell assignment prefixes (VAR=value). The quoted forms are
-# matched on the raw text, before quote stripping, because a quoted value may contain a
-# space and stripping quotes first would end the prefix at that space ("x y" -> "x y").
-function stripassign(s) {
-  while (sub("^[[:space:]]*" assignpre, "", s)) { }
-  return s
-}
-# segbad: every command the line runs. Negation is per command segment, so
-# "never push; cat .env" still reads .env.
-function segbad(line,   n, parts, i, s, whole) {
-  # A trailing shell comment must not mask a read or a delivery command, and quoting is
-  # noise for these patterns.
-  whole = line
-  sub(/(^|[[:space:]])#.*$/, "", whole)
-  whole = stripassign(whole)
-  gsub("[" dq sq bt "]", "", whole)
-  whole = trim(whole)
-  if (whole != "" && !hasneg(whole) && envbad(whole)) envread = 1
-  # ; & | and command substitution (backticks or $( )) each start a new command, so a
-  # nested command is inspected on its own.
-  n = split(line, parts, /[;&|]|[`]|[$][(]/)
-  for (i = 1; i <= n; i++) {
-    s = parts[i]
-    sub(/(^|[[:space:]])#.*$/, "", s)
-    s = stripassign(s)
-    gsub("[" dq sq bt "]", "", s)
-    # a trailing ")" closes a substitution or a subshell around this command
-    sub(/[)]+$/, "", s)
-    s = trim(s)
-    if (s == "") continue
-    if (hasneg(s)) continue
-    if (s ~ ("^" head "git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)")) delivery = 1
-    if (s ~ ("^" head "gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)")) delivery = 1
-    if (envbad(s)) envread = 1
-  }
-}
 BEGIN {
-  # Quoting characters are built from codes so this program stays inside single quotes.
-  dq = sprintf("%c", 34); sq = sprintf("%c", 39); bt = sprintf("%c", 96)
   list = "Objective|Preconditions|Steps|Allowed edit surfaces|Verification|Acceptance criteria|Architecture constraints|Report"
   n = split(list, req, "|")
   for (i = 1; i <= n; i++) idx[req[i]] = i
-  # A command can sit behind a wrapper (sudo, env, timeout, xargs, ...), a control-flow
-  # keyword, a nested shell (-c), eval/exec or find -exec, a path prefix (/usr/bin/,
-  # ./ or ../) or a shell assignment prefix (VAR=value); each carries its own arguments
-  # and the alternatives nest, so sudo plus bash -c plus git push is still one command.
-  nest = "(sudo|env|command|nohup|nice|time|timeout|xargs|doas)([[:space:]]+[^[:space:]]+)*[[:space:]]+"
-  nest = nest "|(then|do|else|if|elif|while|until)([[:space:]]+)"
-  nest = nest "|(bash|sh|zsh|dash|eval|exec)([[:space:]]+-[^[:space:]]+)*[[:space:]]+"
-  nest = nest "|find([[:space:]]+[^[:space:]]+)*[[:space:]]+-exec[[:space:]]+"
-  nest = nest "|((/[^[:space:]/]+)+/|(\\.\\.?/)+)[[:space:]]*"
-  # A shell assignment prefix may carry a quoted value, including one with spaces.
-  nest = nest "|[A-Za-z_][A-Za-z0-9_]*=(" dq "[^" dq "]*" dq "|" sq "[^" sq "]*" sq "|[^[:space:]]*)[[:space:]]+"
-  head = "(" nest ")*"
-  # assignpre is matched on raw text, where the quote characters still delimit the value.
-  assignpre = "[A-Za-z_][A-Za-z0-9_]*=(" dq "[^" dq "]*" dq "|" sq "[^" sq "]*" sq "|[^[:space:]" dq sq "]*)[[:space:]]+"
-  # Readers expose file contents with or without a dedicated "read" verb.
-  readers = "(cat|source|grep|egrep|fgrep|rg|sed|awk|perl|python3?|node|bash|sh|zsh|cp|mv|ln|less|more|head|tail|read|jq|diff|cmp|sort|uniq|wc|tee|cut|tr|env|dotenv|export|realpath|stat"
-  readers = readers "|strings|dd|od|xxd|hexdump|openssl|curl|file|ls|bat|tac|rev|nl|column|paste|join|comm|split|csplit|shuf|fold|fmt)"
-}
-{
-  raw = raw $0 "\n"
-  segbad($0)
 }
 /^[[:space:]]*(```|~~~)/ {
   fence = !fence
@@ -200,8 +107,6 @@ END {
   }
   if (ver ~ /export[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=.*\$\(/ || ver ~ /\|[ \t]*while[ \t]+read/)
     print "- \"## Verification\" must not hide failures with export VAR=$( or | while read"
-  if (delivery || envread)
-    print "- brief must not contain git push, gh pr create|merge|edit, or .env file reads"
 }') || exit 0
 
 [ -z "$problems" ] && exit 0

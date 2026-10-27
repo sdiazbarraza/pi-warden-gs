@@ -11,6 +11,7 @@ import guard, {
   briefOf,
   briefRejection,
   deliveryMatch,
+  envPathMatch,
   heavyMatch,
   destructiveMatch,
   isPublisherProcess,
@@ -287,6 +288,161 @@ test("integration: the publisher may push but never force-push", async () => {
   assert.equal((await fire("tool_call", shell("bash", "git push --force origin main")))?.block, true)
 })
 
+// The execution-time environment-file rule: a command that names a .env file is blocked
+// in every host, publisher included.
+const ENV_BLOCKED_CASES: Array<[string, string]> = [
+  [".env", "cat .env"],
+  [".env", "cat config/.env"],
+  [".env", "busybox cat .env"],
+  [".env", "git show HEAD:.env"],
+  [".env", "git diff -- .env"],
+  [".env.local", "cat .env.local"],
+  [".env.example.local", "cat .env.example.local"],
+  [".env", "cp .env.example .env"],
+  // Quoted paths name the same file: the quotes are shell syntax, not part of the path.
+  [".env", 'cat ".env"'],
+  [".env", "cat '.env'"],
+  [".env", 'cat "config/.env"'],
+  // Punctuated paths name the same file: the punctuation is shell syntax, not part of the path.
+  [".env", "cat .env;"],
+  [".env", "(cat .env)"],
+  [".env", "cat .env)"],
+  [".env", "cat .env,"],
+  [".env", "('.env')"],
+  // The dot of a backup name is part of the name: ".env.bak" is still an environment file.
+  [".env.bak", "cat .env.bak"],
+  // A shell operator or a trailing slash still names the file: the operators separate
+  // tokens, so "cat .env|tee" names the same file as "cat .env".
+  [".env", "cat .env|tee"],
+  [".env", "cat .env&&echo"],
+  [".env", "cat .env>"],
+  [".env", "ls .env/"],
+]
+
+const ENV_ALLOWED_CASES = [
+  "cat .env.example",
+  "cat backup.env.example",
+  'cat ".env.example"',
+  'cat "backup.env.example"',
+  // Names that only look like an environment file stay readable.
+  "cat my.env",
+  "cat .envrc",
+]
+
+test("envPathMatch names the environment file a command reads", () => {
+  for (const [label, command] of ENV_BLOCKED_CASES) {
+    assert.equal(envPathMatch(command), label, command)
+  }
+  for (const command of ENV_ALLOWED_CASES) {
+    assert.equal(envPathMatch(command), null, command)
+  }
+})
+
+// The acceptance cases of the environment-path rule: a punctuated path names the
+// same file, and a name that only looks like one stays readable.
+const ENV_PATH_CASES: Array<[string | null, string]> = [
+  [".env", "cat .env"],
+  [".env", "cat '.env'"],
+  [".env.bak", "cat .env.bak"],
+  [null, "cat .env.example"],
+  [null, "cat backup.env.example"],
+  [null, "cat my.env"],
+  [null, "cat .envrc"],
+  [".env", "cat .env;"],
+  [".env", "(cat .env)"],
+  [".env", "cat .env)"],
+  [".env", "cat .env,"],
+  [".env", "('.env')"],
+]
+
+test("envPathMatch names the environment file behind shell punctuation", () => {
+  for (const [expected, command] of ENV_PATH_CASES) {
+    assert.equal(envPathMatch(command), expected, command)
+  }
+})
+
+// The acceptance cases of the operator rule: a shell operator or a trailing slash still
+// names the environment file, and the commands without them keep their labels.
+const ENV_OPERATOR_CASES: Array<[string | null, string]> = [
+  [".env", "cat .env|tee"],
+  [".env", "cat .env&&echo"],
+  [".env", "cat .env>"],
+  [".env", "ls .env/"],
+  [".env", "cat .env"],
+  [".env", "cat .env;"],
+  [".env", "(cat .env)"],
+  [".env.bak", "cat .env.bak"],
+  [null, "cat .env.example"],
+  [null, "cat backup.env.example"],
+  [null, "cat my.env"],
+  [null, "cat .envrc"],
+]
+
+test("envPathMatch names the environment file behind an operator or a trailing slash", () => {
+  for (const [expected, command] of ENV_OPERATOR_CASES) {
+    assert.equal(envPathMatch(command), expected, command)
+  }
+})
+
+// The acceptance cases of the interior-quote rule: the quotes inside a token are
+// removed before the name is compared, so "cat .e''nv" names .env, and the
+// commands without interior quotes keep their labels.
+const ENV_QUOTE_CASES: Array<[string | null, string]> = [
+  [".env", "cat .e''nv"],
+  [".env", 'cat .e""nv'],
+  [".env", "cat .env"],
+  [".env", "cat config/.env"],
+  [".env.bak", "cat .env.bak"],
+  [".env", "cat .env|tee"],
+  [".env", "ls .env/"],
+  [null, "cat .env.example"],
+  [null, "cat backup.env.example"],
+  [null, "cat my.env"],
+  [null, "cat .envrc"],
+]
+
+test("envPathMatch names the environment file behind quotes inside a token", () => {
+  for (const [expected, command] of ENV_QUOTE_CASES) {
+    assert.equal(envPathMatch(command), expected, command)
+  }
+})
+
+test("integration: an environment file read with quotes inside the token is blocked", async () => {
+  const { fire } = setup()
+  for (const command of ["cat .e''nv", 'cat .e""nv']) {
+    const out = await fire("tool_call", shell("bash", command))
+    assert.equal(out?.block, true, command)
+    assert.match(out?.reason ?? "", /Environment files hold secrets/)
+  }
+  for (const command of ["cat .env.example", "cat backup.env.example", "cat my.env", "cat .envrc"]) {
+    assert.equal((await fire("tool_call", shell("bash", command)))?.block, undefined, command)
+  }
+})
+
+test("integration: commands that name an environment file are blocked", async () => {
+  const { fire } = setup()
+  for (const [label, command] of ENV_BLOCKED_CASES) {
+    const out = await fire("tool_call", shell("bash", command))
+    assert.equal(out?.block, true, command)
+    assert.match(out?.reason ?? "", /Environment files hold secrets/)
+  }
+})
+
+test("integration: the example environment file stays readable", async () => {
+  const { fire } = setup()
+  for (const command of ENV_ALLOWED_CASES) {
+    assert.equal((await fire("tool_call", shell("bash", command)))?.block, undefined, command)
+  }
+})
+
+test("integration: the publisher may deliver but cannot read an environment file", async () => {
+  const { fire } = setup(true)
+  assert.equal((await fire("tool_call", shell("bash", "git push -u origin issue/5-a")))?.block, undefined)
+  const out = await fire("tool_call", shell("bash", "cat .env"))
+  assert.equal(out?.block, true)
+  assert.match(out?.reason ?? "", /Environment files hold secrets/)
+})
+
 test("integration: destructive commands are also checked in bash_background", async () => {
   const { fire } = setup()
   assert.equal((await fire("tool_call", shell("bash_background", "docker volume rm data")))?.block, true)
@@ -404,10 +560,10 @@ test("briefRejection rejects Verification commands that hide failures", () => {
   assert.match(out ?? "", /must not hide failures with export VAR=\$\( or \| while read/)
 })
 
-test("briefRejection rejects delivery commands and .env reads anywhere in the brief", () => {
-  const brief = CONTRACT_BRIEF.replace("one line", "then git push origin main and cat .env")
+test("briefRejection accepts a brief that names a delivery command", () => {
+  const brief = CONTRACT_BRIEF.replace("one line", "then git push origin main")
   const out = briefRejection("gentle-ai-worker", brief, mkdtempSync(join(tmpdir(), "brief-gate-")))
-  assert.match(out ?? "", /must not contain git push, gh pr create\|merge\|edit, or \.env file reads/)
+  assert.equal(out, null, out ?? "")
 })
 
 test("briefRejection accepts a valid contract brief", () => {
