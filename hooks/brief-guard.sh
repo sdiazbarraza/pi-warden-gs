@@ -29,51 +29,62 @@ brief=$(printf '%s' "$brief" | tr -d '\r')
 bytes=$(jq -j '.tool_input.prompt // empty' <<<"$input" 2>/dev/null | tr -d '\r' | wc -c | tr -d '[:space:]') || exit 0
 
 problems=$(printf '%s' "$brief" | awk -v bytes="$bytes" '
+function trim(s) {
+  sub(/^[[:space:]]+/, "", s)
+  sub(/[[:space:]]+$/, "", s)
+  gsub(/[ \t]+/, " ", s)
+  return s
+}
 function isread(line,   t) {
-  t = line
-  sub(/^[[:space:]]+/, "", t)
+  t = trim(line)
   if (t ~ /^[.][[:space:]]/) return 1
-  if (t ~ /^[[:space:]]*(cat|source|grep|egrep|fgrep|sed|awk|perl|python3?|node|bash|sh|zsh|cp|mv|ln|less|more|head|tail|read|jq|diff|cmp|sort|uniq|wc|tee|cut|tr|env|dotenv|export|realpath|stat)[[:space:]]/) return 1
+  if (t ~ ("^(" wrap ")?" readers "[[:space:]]")) return 1
   if (t ~ /<[[:space:]]*\.env/) return 1
-  if (t ~ /--env-file([ =])?\.env/) return 1
+  if (t ~ /--env-file([[:space:]]+|=)?([^[:space:]]*\/)?\.env/) return 1
   return 0
 }
-# envbad: a line reads a .env file in at least one of its commands. The .env.example
-# exemption is applied per semicolon/pipe/ampersand command, and only for a basename that
-# is exactly ".env.example": the left anchor rejects a preceding "." or "-", so
-# "foo..env.example" and "backup.env.example" stay reads, and a sibling read in the same
-# line ("cat .env.example; cat .env") is not covered by the exemption.
-function envbad(line,   n, parts, i, p, t) {
+# envbad: one command segment reads a .env file. The .env.example exemption applies to a
+# basename that is exactly ".env.example": the left anchor rejects a preceding "." or "-",
+# so "foo..env.example" and "backup.env.example" stay reads, and only the exempt token is
+# removed, so "cp .env.example .env" still reads .env.
+function envbad(seg,   t) {
+  if (!isread(seg)) return 0
+  t = seg
+  gsub(/(^|[^A-Za-z0-9_.-])\.env\.example([^A-Za-z0-9_.-]|$)/, " ", t)
+  return t ~ /\.env([^A-Za-z0-9_]|$)/
+}
+# hasneg: the segment is itself a prohibition (imperative list or copula prose), so it names
+# delivery or .env reads without performing them.
+function hasneg(s) {
+  if (s ~ /(^|[^A-Za-z0-9_])(do[[:space:]]+not|must[[:space:]]+not|never|avoid|without|should[[:space:]]+not)[[:space:]]/) return 1
+  if (s ~ /(is|are|was|were|being|remains|stays|must|should|shall)[[:space:]]+(be[[:space:]]+)?(not[[:space:]]+)?(forbidden|prohibited|blocked|disallowed|avoided|not[[:space:]]+allowed)/) return 1
+  return 0
+}
+# segbad: negation is per command segment, so "never push; cat .env" still reads .env.
+function segbad(line,   n, parts, i, s) {
   n = split(line, parts, /[;&|]/)
   for (i = 1; i <= n; i++) {
-    p = parts[i]
-    sub(/^[[:space:]]+/, "", p)
-    sub(/[[:space:]]+$/, "", p)
-    if (p == "" || !isread(p)) continue
-    t = p
-    gsub(/(^|[^A-Za-z0-9_.-])\.env\.example([^A-Za-z0-9_.-]|$)/, " ", t)
-    if (t ~ /\.env([^A-Za-z0-9_]|$)/) return 1
+    s = trim(parts[i])
+    if (s == "") continue
+    if (hasneg(s)) continue
+    if (s ~ (cmdpre "(" wrap ")?" "git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)")) delivery = 1
+    if (s ~ (cmdpre "(" wrap ")?" "gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)")) delivery = 1
+    if (envbad(s)) envread = 1
   }
-  return 0
 }
 BEGIN {
   list = "Objective|Preconditions|Steps|Allowed edit surfaces|Verification|Acceptance criteria|Architecture constraints|Report"
   n = split(list, req, "|")
   for (i = 1; i <= n; i++) idx[req[i]] = i
+  # A command can sit behind a wrapper (sudo, env, xargs, ...) that carries its own
+  # arguments, so the wrapper prefix is allowed before git/gh and before a reader command.
+  wrap = "(sudo|env|command|nohup|nice|time|xargs|doas)([[:space:]]+[^[:space:]]+)*[[:space:]]+"
+  readers = "(cat|source|grep|egrep|fgrep|sed|awk|perl|python3?|node|bash|sh|zsh|cp|mv|ln|less|more|head|tail|read|jq|diff|cmp|sort|uniq|wc|tee|cut|tr|env|dotenv|export|realpath|stat)"
+  cmdpre = "(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*"
 }
 {
   raw = raw $0 "\n"
-  cmd = $0
-  sub(/^[[:space:]]+/, "", cmd)
-  sub(/[[:space:]]+$/, "", cmd)
-  gsub(/[ \t]+/, " ", cmd)
-  neg = cmd ~ /(^|[^A-Za-z0-9_])(do[[:space:]]+not|must[[:space:]]+not|never|avoid|without|should[[:space:]]+not)[[:space:]]/
-  # Prohibition prose: copula or modal, optional "be"/"not", then the prohibition. This
-  # covers "git push should be avoided" without ever excusing a real delivery command.
-  if (cmd ~ /(is|are|was|were|being|remains|stays|must|should|shall)[[:space:]]+(be[[:space:]]+)?(not[[:space:]]+)?(forbidden|prohibited|blocked|disallowed|avoided|not[[:space:]]+allowed)/) neg = 1
-  if (!neg && cmd ~ /(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*git([[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)/) delivery = 1
-  if (!neg && cmd ~ /(^|[;&|($]|then[[:space:]]|do[[:space:]])[[:space:]]*gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+(create|merge|edit)([[:space:]]|$)/) delivery = 1
-  if (!neg && envbad(cmd)) envread = 1
+  segbad($0)
 }
 /^[[:space:]]*(```|~~~)/ {
   fence = !fence

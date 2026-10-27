@@ -205,6 +205,73 @@ test("rejects a 3072-byte brief that ends in a newline", () => {
   assert.equal(run(brief, FORCE, emptyRepo()).status, 2, "trailing newline must not lower the size")
 })
 
+const WRAPPERS = ["sudo", "env", "command", "nohup", "nice", "time", "xargs", "doas"]
+
+test("rejects delivery commands and env reads behind wrapper prefixes", () => {
+  for (const wrapper of WRAPPERS) {
+    for (const line of ["git push origin main", "gh pr create", "cat .env"]) {
+      const result = run(VALID.replace("one line", `${wrapper} ${line}`), FORCE, emptyRepo())
+      assert.equal(result.status, 2, `${wrapper} ${line}`)
+      assert.match(result.stderr, /must not contain git push/, `${wrapper} ${line}`)
+    }
+  }
+})
+
+test("rejects wrapper prefixes that carry their own arguments", () => {
+  for (const line of ["sudo -u root git push origin main", "nice -n 5 gh pr merge 1", "xargs -0 cat .env"]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /must not contain git push/, line)
+  }
+})
+
+test("applies negation per command segment, not per line", () => {
+  for (const line of [
+    "never push; cat .env",
+    "do not push; gh pr create",
+    "git push should be avoided && cat .env",
+    "must not read .env; git push origin main",
+    "never push | gh pr edit 1",
+  ]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /must not contain git push/, line)
+  }
+})
+
+test("keeps a lone negated segment allowed", () => {
+  for (const line of ["never push", "do not push"]) {
+    const ok = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(ok.status, 0, `${line}: ${ok.stderr}`)
+  }
+})
+
+test("rejects --env-file forms with a path before .env", () => {
+  for (const line of [
+    "--env-file=./.env",
+    "--env-file config/.env",
+    "--env-file=config/.env",
+    "dotenv --env-file=config/.env",
+    "env --env-file ./.env",
+  ]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /\.env file reads/, line)
+  }
+})
+
+test("keeps the .env.example exemption for --env-file path forms", () => {
+  for (const line of ["--env-file=./.env.example", "cat .env.example"]) {
+    const ok = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(ok.status, 0, `${line}: ${ok.stderr}`)
+  }
+})
+
+test("fails open when the hook input cannot be parsed", () => {
+  const result = spawnSync(SCRIPT, [], { input: "not json", encoding: "utf8", env: { ...process.env, ...FORCE } })
+  assert.equal(result.status, 0, result.stderr)
+})
+
 test("keeps the repository trigger when no caller forces the check", () => {
   const cwd = emptyRepo()
   const malformed = "## Objective\nonly one heading\n"
