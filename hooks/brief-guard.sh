@@ -97,16 +97,19 @@ BEGIN {
   list = "Objective|Preconditions|Steps|Allowed edit surfaces|Verification|Acceptance criteria|Architecture constraints|Report"
   n = split(list, req, "|")
   for (i = 1; i <= n; i++) idx[req[i]] = i
-  # A command can sit behind a wrapper (sudo, env, xargs, ...), a control-flow keyword,
-  # a nested shell (-c), eval/exec or find -exec; each carries its own arguments and the
-  # alternatives nest, so sudo plus bash -c plus git push is still one command.
-  nest = "(sudo|env|command|nohup|nice|time|xargs|doas)([[:space:]]+[^[:space:]]+)*[[:space:]]+"
+  # A command can sit behind a wrapper (sudo, env, timeout, xargs, ...), a control-flow
+  # keyword, a nested shell (-c), eval/exec or find -exec, a path prefix (/usr/bin/,
+  # ./ or ../) or a shell assignment prefix (VAR=value); each carries its own arguments
+  # and the alternatives nest, so sudo plus bash -c plus git push is still one command.
+  nest = "(sudo|env|command|nohup|nice|time|timeout|xargs|doas)([[:space:]]+[^[:space:]]+)*[[:space:]]+"
   nest = nest "|(then|do|else|if|elif|while|until)([[:space:]]+)"
   nest = nest "|(bash|sh|zsh|dash|eval|exec)([[:space:]]+-[^[:space:]]+)*[[:space:]]+"
   nest = nest "|find([[:space:]]+[^[:space:]]+)*[[:space:]]+-exec[[:space:]]+"
+  nest = nest "|((/[^[:space:]/]+)+/|(\\.\\.?/)+)[[:space:]]*"
+  nest = nest "|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+"
   head = "(" nest ")*"
   # Readers expose file contents with or without a dedicated "read" verb.
-  readers = "(cat|source|grep|egrep|fgrep|sed|awk|perl|python3?|node|bash|sh|zsh|cp|mv|ln|less|more|head|tail|read|jq|diff|cmp|sort|uniq|wc|tee|cut|tr|env|dotenv|export|realpath|stat"
+  readers = "(cat|source|grep|egrep|fgrep|rg|sed|awk|perl|python3?|node|bash|sh|zsh|cp|mv|ln|less|more|head|tail|read|jq|diff|cmp|sort|uniq|wc|tee|cut|tr|env|dotenv|export|realpath|stat"
   readers = readers "|strings|dd|od|xxd|hexdump|openssl|curl|file|ls|bat|tac|rev|nl|column|paste|join|comm|split|csplit|shuf|fold|fmt)"
   # Quoting characters are built from codes so this program stays inside single quotes.
   dq = sprintf("%c", 34); sq = sprintf("%c", 39); bt = sprintf("%c", 96)

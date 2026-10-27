@@ -342,3 +342,43 @@ test("keeps the repository trigger when no caller forces the check", () => {
   writeFileSync(join(cwd, "AGENTS.md"), "### Brief del subagente\n")
   assert.equal(run(malformed, {}, cwd).status, 2, "the repository trigger still applies")
 })
+
+test("rejects delivery commands and env reads behind path prefixes", () => {
+  for (const line of [
+    "/usr/bin/git push origin main",
+    "/bin/cat .env",
+    "/usr/local/bin/gh pr create",
+    "../git push origin main",
+    "./cat .env",
+  ]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /must not contain git push/, line)
+  }
+})
+
+test("rejects shell assignment prefixes before a command", () => {
+  for (const line of ["TOKEN=x cat .env", "CI=1 git push", "FOO=1 cat .env", "A=1 B=2 gh pr create", 'TOKEN="x" cat .env']) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /must not contain git push/, line)
+  }
+})
+
+test("rejects timeout-wrapped commands", () => {
+  for (const line of ["timeout git push", "timeout 5 git push origin main", "timeout 10 cat .env", "timeout -s KILL 5 gh pr create"]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /must not contain git push/, line)
+  }
+})
+
+test("rejects rg reads of .env and keeps the .env.example exemption", () => {
+  for (const line of ["rg secret .env", "rg -n secret .env", "rg --files-with-matches secret .env"]) {
+    const result = run(VALID.replace("one line", line), FORCE, emptyRepo())
+    assert.equal(result.status, 2, line)
+    assert.match(result.stderr, /\.env file reads/, line)
+  }
+  const ok = run(VALID.replace("one line", "rg secret .env.example"), FORCE, emptyRepo())
+  assert.equal(ok.status, 0, ok.stderr)
+})
