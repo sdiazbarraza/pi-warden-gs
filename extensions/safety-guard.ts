@@ -11,7 +11,7 @@
 //      approval, persisted as a session entry so it survives reload/resume.
 //    - gentle-ai-worker and gentle-ai-worker-infra launch only
 //      when the sha256 of their brief (task + context) holds an unused approval.
-//      Workers may skip review when the brief's first line is the small-fix marker.
+//      Workers may skip the model review when the brief's first line is the small-fix marker; the instant brief-guard checks still run.
 //    - Workers also pass the structure check of hooks/brief-guard.sh, which the Pi side forces
 //      with BRIEF_GUARD_FORCE_STRUCTURE=1 so it cannot be inert or depend on repository config.
 //    - Any internal error, or a brief-guard that cannot run, BLOCKS the dispatch.
@@ -220,6 +220,18 @@ export function isSmallFixExempt(agent: string, brief: string): boolean {
   return normalizeBrief(brief).split("\n")[0] === SKIP_MARKER
 }
 
+/** Writer named outside <<<BRIEF / BRIEF>>> in a reviewer task; default gentle-ai-worker. */
+export function writerAgentOfReviewTask(task: string): string {
+  const lines = task.replace(/\r\n/g, "\n").split("\n")
+  const start = lines.indexOf("<<<BRIEF")
+  const end = lines.indexOf("BRIEF>>>")
+  const outer =
+    start >= 0 && end > start ? [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n") : task
+  if (/\bgentle-ai-worker-infra\b/.test(outer)) return "gentle-ai-worker-infra"
+  if (/\bgentle-ai-worker\b/.test(outer)) return "gentle-ai-worker"
+  return "gentle-ai-worker"
+}
+
 type Entry = { customType?: string; data?: unknown }
 
 function dataField(entry: Entry, key: string): string | null {
@@ -388,21 +400,24 @@ export default function (
           if (/^VERDICT:/m.test(marked)) {
             return { block: true, reason: "safety-guard: the brief text must not contain a line starting with `VERDICT:`." }
           }
+          const cwd =
+            text(input.workspace_root) || text(input.repository_root) || text((ctx as { cwd?: unknown }).cwd) || process.cwd()
+          const rejection = briefRejection(writerAgentOfReviewTask(task), marked, cwd)
+          if (rejection) return { block: true, reason: rejection }
           pendingReviews.set(event.toolCallId, sha256(marked))
           return
         }
 
         if (WRITER_AGENTS.has(agent) || GATED_AGENTS.has(agent)) {
           const brief = briefOf(task, input.context)
-          // The small-fix marker is the human-authorized skip path, so it bypasses the structural
-          // contract too; structure and approval apply only to briefs that go through review.
-          if (isSmallFixExempt(agent, brief)) return
+          const cwd =
+            text(input.workspace_root) || text(input.repository_root) || text((ctx as { cwd?: unknown }).cwd) || process.cwd()
           if (WRITER_AGENTS.has(agent)) {
-            const cwd =
-              text(input.workspace_root) || text(input.repository_root) || text((ctx as { cwd?: unknown }).cwd) || process.cwd()
             const rejection = briefRejection(agent, brief, cwd)
             if (rejection) return { block: true, reason: rejection }
           }
+          // Small-fix skips the model review only; the instant guard still runs above.
+          if (isSmallFixExempt(agent, brief)) return
           const hash = sha256(brief)
           if (!approvals.consume(hash)) return { block: true, reason: NOT_APPROVED }
           pi.appendEntry(APPROVAL_USED, { sha256: hash })

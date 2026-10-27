@@ -38,7 +38,7 @@ const VALID_BRIEF = `## Objective
 add the flag
 
 ## Preconditions
-repo clean
+On expected branch feat/example; HEAD is that tip; tree is clean (git status --short).
 
 ## Steps
 1. edit the guard
@@ -296,7 +296,7 @@ test("an approval of one session does not approve another", () => {
 
 test("allows a small-fix writer launch without approval", () => {
   const state = stateDir()
-  const brief = "<!-- review: skipped (small fix) -->\nfix the typo"
+  const brief = `<!-- review: skipped (small fix) -->\n${VALID_BRIEF}`
   const result = runHook("safety-guard.mjs", writerLaunch(brief), { CLAUDE_WARDEN_STATE_DIR: state })
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stdout.trim(), "")

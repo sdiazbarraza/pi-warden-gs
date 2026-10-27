@@ -30,7 +30,7 @@ const CONTRACT_BRIEF = `## Objective
 Do it
 
 ## Preconditions
-none
+On expected branch feat/example; HEAD is that tip; tree is clean (git status --short).
 
 ## Steps
 1. do it
@@ -200,7 +200,7 @@ test("integration: approval survives session_start rebuild", async () => {
 
 test("small-fix marker exempts workers only", async () => {
   const { fire } = setup()
-  const task = `${SKIP}\n## Objective\nx`
+  const task = `${SKIP}\n${CONTRACT_BRIEF}`
   assert.equal((await fire("tool_call", call("a", { agent: "gentle-ai-worker", mode: "task", task })))?.block, undefined)
 })
 
@@ -357,4 +357,81 @@ test("integration: a structurally invalid writer brief is blocked by the real gu
   const out = await fire("tool_call", call("w1", { agent: "gentle-ai-worker", mode: "task", task: malformed }))
   assert.equal(out?.block, true)
   assert.match(out.reason, /brief-guard/)
+})
+
+test("briefRejection rejects a brief of 3072 bytes or more", () => {
+  const brief = CONTRACT_BRIEF.replace("one line", "x".repeat(3072))
+  const out = briefRejection("gentle-ai-worker", brief, mkdtempSync(join(tmpdir(), "brief-gate-")))
+  assert.match(out ?? "", /brief must be smaller than 3072 bytes/)
+})
+
+test("briefRejection rejects Strict TDD that is not the first Steps line", () => {
+  const brief = CONTRACT_BRIEF.replace(
+    "## Steps\n1. do it\n",
+    "## Steps\n1. do it\nStrict TDD is active.\n",
+  )
+  const out = briefRejection("gentle-ai-worker", brief, mkdtempSync(join(tmpdir(), "brief-gate-")))
+  assert.match(out ?? "", /must start with: Strict TDD is active/)
+})
+
+test("briefRejection rejects preferred, may, or if possible in Steps", () => {
+  const brief = CONTRACT_BRIEF.replace("1. do it", "1. you may edit")
+  const out = briefRejection("gentle-ai-worker", brief, mkdtempSync(join(tmpdir(), "brief-gate-")))
+  assert.match(out ?? "", /must not contain "preferred", "may", or "if possible"/)
+})
+
+test("briefRejection rejects Preconditions that omit branch, HEAD, or git status --short", () => {
+  const brief = CONTRACT_BRIEF.replace(
+    "On expected branch feat/example; HEAD is that tip; tree is clean (git status --short).",
+    "repo is ready",
+  )
+  const out = briefRejection("gentle-ai-worker", brief, mkdtempSync(join(tmpdir(), "brief-gate-")))
+  assert.match(out ?? "", /must reference the expected branch, HEAD, and git status --short/)
+})
+
+test("briefRejection rejects Allowed edit surfaces that are not paths or globs", () => {
+  const brief = CONTRACT_BRIEF.replace("src/a.ts", "- src/a.ts")
+  const out = briefRejection("gentle-ai-worker", brief, mkdtempSync(join(tmpdir(), "brief-gate-")))
+  assert.match(out ?? "", /not a repository-relative path or narrow glob/)
+})
+
+test("briefRejection rejects Verification commands that hide failures", () => {
+  const brief = CONTRACT_BRIEF.replace(
+    "node --test tests/safety-guard.test.ts",
+    "export OUT=$(node --test tests/safety-guard.test.ts)\nls | while read f; do echo f; done",
+  )
+  const out = briefRejection("gentle-ai-worker", brief, mkdtempSync(join(tmpdir(), "brief-gate-")))
+  assert.match(out ?? "", /must not hide failures with export VAR=\$\( or \| while read/)
+})
+
+test("briefRejection rejects delivery commands and .env reads anywhere in the brief", () => {
+  const brief = CONTRACT_BRIEF.replace("one line", "then git push origin main and cat .env")
+  const out = briefRejection("gentle-ai-worker", brief, mkdtempSync(join(tmpdir(), "brief-gate-")))
+  assert.match(out ?? "", /must not contain git push, gh pr create\|merge\|edit, or \.env file reads/)
+})
+
+test("briefRejection accepts a valid contract brief", () => {
+  const out = briefRejection("gentle-ai-worker", CONTRACT_BRIEF, mkdtempSync(join(tmpdir(), "brief-gate-")))
+  assert.equal(out, null, out ?? "")
+})
+
+test("integration: reviewer launch is blocked when the marked brief fails the guard", async () => {
+  const { fire } = setup()
+  const malformed = "## Objective\nonly one heading\n"
+  const out = await fire(
+    "tool_call",
+    call("c1", { agent: "gentle-ai-brief-review", mode: "task", task: `for gentle-ai-worker\n<<<BRIEF\n${malformed}\nBRIEF>>>` }),
+  )
+  assert.equal(out?.block, true)
+  assert.match(out?.reason ?? "", /brief-guard/)
+})
+
+test("integration: small-fix skips model review and still runs instant guard checks", async () => {
+  const { fire } = setup()
+  const bad = `${SKIP}\n## Objective\nx`
+  const blocked = await fire("tool_call", call("a", { agent: "gentle-ai-worker", mode: "task", task: bad }))
+  assert.equal(blocked?.block, true)
+  assert.match(blocked?.reason ?? "", /brief-guard/)
+  const ok = await fire("tool_call", call("b", { agent: "gentle-ai-worker", mode: "task", task: `${SKIP}\n${CONTRACT_BRIEF}` }))
+  assert.equal(ok?.block, undefined)
 })

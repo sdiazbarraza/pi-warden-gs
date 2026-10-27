@@ -220,7 +220,7 @@ export default function (pi: ExtensionAPI) {
 | Extension | Hooks | What it does | Failure mode |
 | --- | --- | --- | --- |
 | `safety-guard.ts` | `tool_call` | Blocks destructive bash commands, blocks direct delivery commands outside `gentle-ai-publisher`, blocks heavy builds in the orchestrator, and gates writer dispatch on a reviewed brief | Fail-**closed** on writer dispatch (any guard error blocks), fail-open on the bash destructive check |
-| `brief-guard.sh` (hook) | Claude Code `PreToolUse`, and spawned by `safety-guard` | Checks the eight required brief sections, their order and the literal stop-and-report clause | Fail-open on parsing, exit 2 on a malformed brief |
+| `brief-guard.sh` (hook) | Claude Code `PreToolUse`, and spawned by `safety-guard` | Checks the eight required brief sections, their order, the stop-and-report clause, size, TDD line, weasel words, preconditions, edit surfaces, hidden-failure commands, delivery commands and `.env` reads | Fail-open on parsing, exit 2 on a malformed brief |
 | `reply-length.ts` | `before_agent_start` | Adds one hidden reminder per user-started run of the main session: at most 5 lines of at most 25 words, outcome first, long content in a file | Cannot fail: it only appends a message |
 | `rtk.ts` | `tool_call` | Rewrites bash commands to use `rtk` for token savings | Leaves commands alone when it cannot rewrite them |
 
@@ -234,19 +234,22 @@ Writer subagents (`gentle-ai-worker`, `gentle-ai-worker-infra`) only start with 
 
 1. The orchestrator runs `gentle-ai-brief-review` with `mode: "task"` and the exact brief inline,
    between a line `<<<BRIEF` and a line `BRIEF>>>`.
-2. `safety-guard.ts` requires the reviewer to run in a foreground `task`, and rejects a brief that
-   already contains a `VERDICT:` line.
+2. `safety-guard.ts` requires the reviewer to run in a foreground `task`, rejects a brief that
+   already contains a `VERDICT:` line, and runs `brief-guard.sh` on the marked brief before the
+   model review starts.
 3. On `VERDICT: APPROVE` the sha256 of the normalized brief (CRLF → LF, trimmed) becomes a session
    entry, an approval.
 4. Launching a writer consumes that approval for byte-identical text (task plus context). Approvals
    are single-use: any edit needs a new review.
-5. Before the approval is consumed, `hooks/brief-guard.sh` checks the structure. Pi forces that
-   check with `BRIEF_GUARD_FORCE_STRUCTURE=1`, so it applies to every writer brief regardless of
-   `AGENTS.md` or of whether the working directory is a git repository. In Claude Code the same
-   script runs as a hook, and there it activates only in repositories whose `AGENTS.md` defines
-   `### Brief del subagente`.
-6. A brief whose first line is `<!-- review: skipped (small fix) -->` skips both the review and the
-   structural contract, by design.
+5. Before the approval is consumed, `hooks/brief-guard.sh` checks the structure and the extra
+   mechanical rules (size, TDD line, weasel words, preconditions, edit surfaces, hidden-failure
+   commands, delivery and `.env` reads). Pi forces that check with `BRIEF_GUARD_FORCE_STRUCTURE=1`,
+   so it applies to every writer brief regardless of `AGENTS.md` or of whether the working directory
+   is a git repository. In Claude Code the same script runs as a hook, and there it activates only
+   in repositories whose `AGENTS.md` defines `### Brief del subagente`. The reviewer still judges
+   verbatim acceptance-criteria matching against the issue and whether the plan is the right work.
+6. A brief whose first line is `<!-- review: skipped (small fix) -->` skips the model review and
+   still runs the instant `brief-guard.sh` checks.
 7. `subagent_continue` and `subagent_send_message` to a writer task are always blocked: new
    instructions need a new reviewed brief.
 
