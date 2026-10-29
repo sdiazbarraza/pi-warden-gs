@@ -193,11 +193,20 @@ update_json() {
   fi
 }
 
-update_json "$PI_HOME/settings.json" '
-  .extensions = (
-    (.extensions // []) as $e
-    | $e + (["-builtin:mcp", "-builtin:codemode"] - $e)
-  )'
+# This installer never disables a built-in extension. Installing a guard package must not turn off
+# MCP support (or any other built-in): that is the user's setting, not the package's. A file a
+# previous version already changed is reported and left byte-identical.
+SETTINGS_FILE="$PI_HOME/settings.json"
+if [ -f "$SETTINGS_FILE" ]; then
+  if ! disabled_builtins="$(jq -r '(.extensions // [])[] | select(type == "string" and startswith("-builtin:"))' \
+    "$SETTINGS_FILE" 2>/dev/null)"; then
+    echo "warning: $SETTINGS_FILE is not valid JSON; it is left untouched, so this installer cannot tell whether it disables a built-in extension" >&2
+  elif [ -n "$disabled_builtins" ]; then
+    while IFS= read -r disabled; do
+      echo "note: $SETTINGS_FILE disables $disabled; remove that entry to load the built-in again"
+    done <<< "$disabled_builtins"
+  fi
+fi
 
 # Adds the MiniMax M3.1 preview model used by plan-minimax-m3; keeps every other entry and key.
 update_json "$PI_HOME/models.json" "$(cat "$PKG_DIR/pi/models-minimax.jq")"

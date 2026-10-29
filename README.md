@@ -68,7 +68,9 @@ cd pi-warden-gs
    `~/.claude/CLAUDE.md`, and the hook registrations in `~/.claude/settings.json`.
 5. Moves previously loose `safety-guard.ts`, `rtk.ts` and `minimax-review-binding.ts` out of
    `<agent-dir>/extensions` into `extensions-backup-<stamp>/`, so a stale copy cannot load twice.
-6. Disables the `builtin:mcp` and `builtin:codemode` extensions in `<agent-dir>/settings.json`.
+6. Never disables a built-in extension: `<agent-dir>/settings.json` is not rewritten, and every
+   `-builtin:<name>` entry it still holds is reported so you can remove it yourself. A file that is
+   not valid JSON is reported on stderr and left untouched, because the check cannot run on it.
 7. Registers this directory as a Pi package (`gentle-shell install <dir>`, or `pi install <dir>`
    without gentle-shell).
 8. Backs up every file it would overwrite to `*.bak-<stamp>` and keeps the originals otherwise.
