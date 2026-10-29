@@ -90,6 +90,40 @@ test("an untouched placeholder is overwritten by the package text", () => {
   assert.match(after, /^model: provider\/model$/m)
 })
 
+// Installing a guard package must never turn off a built-in extension: MCP support included.
+// The installer does not write this file at all, so a fresh home has none.
+test("the installer never disables a built-in extension", () => {
+  const { agent, out } = setup("link")
+  assert.equal(out.status, 0, out.stderr)
+  assert.equal(existsSync(join(agent, "settings.json")), false)
+})
+
+// A settings file a previous version already changed is reported, never rewritten.
+test("every disabled built-in extension is reported once and the file stays byte-identical", () => {
+  const { agent, rerun } = setup("link")
+  const settings = join(agent, "settings.json")
+  const before = '{\n  "extensions": [\n    "-builtin:mcp",\n    "-builtin:codemode",\n    "./local.ts"\n  ]\n}\n'
+  writeFileSync(settings, before)
+  const out = rerun()
+  assert.equal(out.status, 0, out.stderr)
+  assert.equal(readFileSync(settings, "utf8"), before)
+  assert.match(out.stdout, /disables -builtin:mcp/)
+  assert.match(out.stdout, /disables -builtin:codemode/)
+  assert.equal(out.stdout.match(/disables -builtin:/g)?.length, 2)
+})
+
+// A file the installer cannot parse must say so: silence would hide a disabled MCP entry.
+test("an unreadable settings file is reported instead of silently passing", () => {
+  const { agent, rerun } = setup("link")
+  const settings = join(agent, "settings.json")
+  const before = '{ "extensions": [ "-builtin:mcp", ],, }\n'
+  writeFileSync(settings, before)
+  const out = rerun()
+  assert.equal(out.status, 0, out.stderr)
+  assert.equal(readFileSync(settings, "utf8"), before)
+  assert.match(out.stderr, /not valid JSON/)
+})
+
 test("PI_WARDEN_GS_MODEL overrides a model the user had chosen", () => {
   const { agent, rerun } = setup("link")
   const file = join(agent, "agents", "gentle-ai-publisher.md")
