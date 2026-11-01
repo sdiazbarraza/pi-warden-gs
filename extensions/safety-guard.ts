@@ -31,9 +31,9 @@
 
 import { createHash } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
@@ -45,6 +45,9 @@ const SKIP_MARKER = "<!-- review: skipped (small fix) -->"
 const APPROVAL = "pi-warden-gs.brief-approval"
 const APPROVAL_USED = "pi-warden-gs.brief-approval-used"
 const WRITER_TASK = "pi-warden-gs.writer-task"
+const REVIEW_ROUND = "pi-warden-gs.review-round"
+const REVIEW_ROUND_REFUND = "pi-warden-gs.review-round-refund"
+export const MAX_REVIEW_ROUNDS = 3
 
 function resolveBriefGuard(): string {
   const override = process.env.PI_WARDEN_GS_BRIEF_GUARD
@@ -284,6 +287,66 @@ export function writerAgentOfReviewTask(task: string): string {
   return "gentle-ai-worker"
 }
 
+// Round identity of a review: the worktree the launch declares on its first line, canonicalized.
+// Nothing else enters the key: the brief and the previous findings change on every round, the
+// writer is never read from free text (a finding can name another agent), and the declaration is
+// read only from the first line so neither the brief nor a finding can redirect or split the count.
+function canonicalPath(value: string): string {
+  try {
+    return realpathSync(value)
+  } catch {
+    return resolve(value)
+  }
+}
+
+/** The `worktree: <absolute path>` declaration on the first line of a reviewer task, if any. */
+export function declaredWorktree(task: string): string | null {
+  const first = task.replace(/\r\n/g, "\n").split("\n")[0] ?? ""
+  const m = /^worktree:[ \t]*(\S.*)$/.exec(first)
+  if (!m) return null
+  const value = m[1].trim().replace(/^[`"']+|[`"']+$/g, "")
+  if (!value || !isAbsolute(value)) return null
+  if (!existsSync(value)) return null
+  return canonicalPath(value)
+}
+
+/** The canonical worktree of a reviewer launch, or null when the launch does not declare one. */
+export function roundIdentity(task: string): string | null {
+  const worktree = declaredWorktree(task)
+  return worktree === null ? null : sha256(worktree)
+}
+
+export class ReviewRounds {
+  private counts = new Map<string, number>()
+  start(lineage: string): void {
+    this.counts.set(lineage, (this.counts.get(lineage) ?? 0) + 1)
+  }
+  count(lineage: string): number {
+    return this.counts.get(lineage) ?? 0
+  }
+  // A review that errored produced no findings, so its round is given back.
+  refund(lineage: string): void {
+    const n = this.count(lineage)
+    if (n <= 0) return
+    if (n === 1) this.counts.delete(lineage)
+    else this.counts.set(lineage, n - 1)
+  }
+  atCap(lineage: string): boolean {
+    return this.count(lineage) >= MAX_REVIEW_ROUNDS
+  }
+  static fromEntries(entries: Entry[]): ReviewRounds {
+    const rounds = new ReviewRounds()
+    for (const e of entries) {
+      if (e.customType !== REVIEW_ROUND && e.customType !== REVIEW_ROUND_REFUND) continue
+      const lineage = dataField(e, "lineage")
+      if (!lineage) continue
+      if (e.customType === REVIEW_ROUND) rounds.start(lineage)
+      else rounds.refund(lineage)
+    }
+    return rounds
+  }
+}
+
 type Entry = { customType?: string; data?: unknown }
 
 function dataField(entry: Entry, key: string): string | null {
@@ -377,6 +440,10 @@ const NOT_APPROVED =
   'safety-guard: brief not approved. Run gentle-ai-brief-review with mode "task" and this exact text between <<<BRIEF and BRIEF>>>, then relaunch the identical text. Approvals are single-use.'
 const WRITER_FOLLOWUP =
   "safety-guard: new instructions to a writer task are blocked; launch a new reviewed brief instead."
+const REVIEW_ROUNDS_BLOCKED =
+  "safety-guard: this worktree already used three reviews of a worker brief. Fix every finding from the last review in one pass before relaunching; three reviews per worktree are the limit, and an errored review gives its round back."
+const WORKTREE_REQUIRED =
+  "safety-guard: start the reviewer task with `worktree: <absolute path>` as its first line, pointing at the existing worktree under review. That line is the round identity of the three-review cap, so it must not come from the brief, a finding or the context."
 
 export default function (
   pi: ExtensionAPI,
@@ -385,13 +452,15 @@ export default function (
 ) {
   let approvals = new ApprovalStore()
   let writerTasks = new WriterTasks()
-  const pendingReviews = new Map<string, string>()
+  let rounds = new ReviewRounds()
+  const pendingReviews = new Map<string, { hash: string; lineage: string }>()
 
   const rebuild = (ctx: unknown) => {
     try {
       const entries = ((ctx as { sessionManager: { getBranch(): Entry[] } }).sessionManager.getBranch() ?? []) as Entry[]
       approvals = ApprovalStore.fromEntries(entries)
       writerTasks = WriterTasks.fromEntries(entries)
+      rounds = ReviewRounds.fromEntries(entries)
     } catch (err) {
       console.warn("[safety-guard] could not rebuild state from the session", err)
     }
@@ -463,7 +532,12 @@ export default function (
             text(input.workspace_root) || text(input.repository_root) || text((ctx as { cwd?: unknown }).cwd) || process.cwd()
           const rejection = briefRejection(writerAgentOfReviewTask(task), marked, cwd)
           if (rejection) return { block: true, reason: rejection }
-          pendingReviews.set(event.toolCallId, sha256(marked))
+          const lineage = roundIdentity(task)
+          if (lineage === null) return { block: true, reason: WORKTREE_REQUIRED }
+          if (rounds.atCap(lineage)) return { block: true, reason: REVIEW_ROUNDS_BLOCKED }
+          rounds.start(lineage)
+          pi.appendEntry(REVIEW_ROUND, { lineage, at: new Date().toISOString() })
+          pendingReviews.set(event.toolCallId, { hash: sha256(marked), lineage })
           return
         }
 
@@ -509,15 +583,20 @@ export default function (
       const input = event.input as SubagentInput
       const agent = text(input.agent)
       if (agent === REVIEWER) {
-        const hash = pendingReviews.get(event.toolCallId)
+        const pending = pendingReviews.get(event.toolCallId)
         pendingReviews.delete(event.toolCallId)
-        if (!hash || event.isError) return
+        if (!pending) return
+        if (event.isError) {
+          rounds.refund(pending.lineage)
+          pi.appendEntry(REVIEW_ROUND_REFUND, { lineage: pending.lineage, at: new Date().toISOString() })
+          return
+        }
         const body = (event.content ?? [])
           .map((c) => (c.type === "text" ? c.text : ""))
           .join("\n")
         if (parseVerdict(body) === "APPROVE") {
-          approvals.add(hash)
-          pi.appendEntry(APPROVAL, { sha256: hash, at: new Date().toISOString() })
+          approvals.add(pending.hash)
+          pi.appendEntry(APPROVAL, { sha256: pending.hash, at: new Date().toISOString() })
         }
         return
       }

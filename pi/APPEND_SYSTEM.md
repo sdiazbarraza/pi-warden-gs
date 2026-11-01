@@ -97,10 +97,19 @@ gentle-pi. Project rules belong in each project's AGENTS.md.
   `task` (plus `context`, joined by one blank line). safety-guard hashes
   both and blocks any launch whose exact brief was not approved. Approvals
   are single-use: any edit, or a second launch, needs a new review.
-- `VERDICT: FIX`: correct the brief and its inputs and review again. Stop
-  and show the human the findings only when a `FIX` repeats a finding from
-  an earlier review of the same brief, or after the third review; new minor
-  findings are fixed without asking. `VERDICT: APPROVE`:
+- `VERDICT: FIX`: fix every finding from that review in one pass, with the
+  inputs those findings depend on, and relaunch once. Pass the previous
+  findings back to the reviewer verbatim, one per line, so it classifies each
+  one as `CLOSED`, `OPEN` or `NEW`. Every reviewer launch declares its worktree
+  on its FIRST line, exactly `worktree: <absolute path>`: that canonical path
+  is the round identity, and safety-guard blocks a launch without it. A
+  worktree gets at most three reviews; safety-guard blocks the fourth launch of
+  the same worktree, and a review that ends in an error gives its round back.
+  The brief, the context and the previous findings never set the identity, so a
+  corrected brief keeps its count. Stop and show the human the findings when a
+  `FIX` repeats a finding from an earlier review of the same brief, when the
+  third review still returns `FIX`, or when the cap blocks the launch; new
+  minor findings are fixed without asking. `VERDICT: APPROVE`:
   launch the identical text without showing it unless the human asked to
   see it; report the verdict in one line.
 - Never send new instructions to a writer task
