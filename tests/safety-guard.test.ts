@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -17,6 +17,10 @@ import guard, {
   isPublisherProcess,
   extractMarkedBrief,
   isSmallFixExempt,
+  MAX_REVIEW_ROUNDS,
+  ReviewRounds,
+  declaredWorktree,
+  roundIdentity,
   taskIdFromText,
   normalizeBrief,
   parseVerdict,
@@ -152,7 +156,7 @@ const result = (id: string, input: any, text: string, details?: any) => ({
 test("integration: review gate", async () => {
   const { fire, entries } = setup()
   const brief = CONTRACT_BRIEF
-  const reviewInput = { agent: "gentle-ai-brief-review", mode: "task", task: `review\n<<<BRIEF\n${brief}\nBRIEF>>>` }
+  const reviewInput = { agent: "gentle-ai-brief-review", mode: "task", task: `worktree: ${WT_A}\n<<<BRIEF\n${brief}\nBRIEF>>>` }
   assert.equal((await fire("tool_call", call("c1", reviewInput)))?.block, undefined)
   await fire(
     "tool_result",
@@ -189,7 +193,7 @@ test("integration: review gate", async () => {
 test("integration: approval survives session_start rebuild", async () => {
   const { fire } = setup()
   const brief = CONTRACT_BRIEF
-  const reviewInput = { agent: "gentle-ai-brief-review", mode: "task", task: `<<<BRIEF\n${brief}\nBRIEF>>>` }
+  const reviewInput = { agent: "gentle-ai-brief-review", mode: "task", task: `worktree: ${WT_A}\n<<<BRIEF\n${brief}\nBRIEF>>>` }
   await fire("tool_call", call("c1", reviewInput))
   await fire("tool_result", result("c1", reviewInput, "VERDICT: APPROVE"))
   await fire("session_start", { type: "session_start", reason: "reload" })
@@ -580,6 +584,209 @@ test("integration: reviewer launch is blocked when the marked brief fails the gu
   )
   assert.equal(out?.block, true)
   assert.match(out?.reason ?? "", /brief-guard/)
+})
+
+// The round identity is the worktree the launch declares on its FIRST line: stable while the brief
+// and the previous findings change, and untouchable from inside the brief.
+const wtRoot = mkdtempSync(join(tmpdir(), "pi-warden-gs-wt-"))
+const worktree = (name: string) => {
+  const path = join(wtRoot, name)
+  mkdirSync(path, { recursive: true })
+  return path
+}
+const WT_A = worktree("a")
+const WT_B = worktree("b")
+const WT_C = worktree("c")
+const WT_D = worktree("d")
+const symlinked = join(wtRoot, "symlink-to-a")
+
+symlinkSync(WT_A, symlinked)
+const marked = (body: string) => `<<<BRIEF\n${body}\nBRIEF>>>`
+const reviewTask = (worktreePath: string, extra: string, brief: string) =>
+  [`worktree: ${worktreePath}`, extra, "", marked(brief)].filter((l) => l !== "").join("\n")
+const reviewLaunch = (id: string, worktreePath: string, extra: string, brief: string) =>
+  call(id, { agent: "gentle-ai-brief-review", mode: "task", task: reviewTask(worktreePath, extra, brief) })
+
+const FIX_RESULT = 'Subagent gentle-ai-brief-review (task r1, "x") finished.\n\n- [IMPORTANTE] x\nVERDICT: FIX'
+
+// The shape the override documents: the parent passes the previous findings back, one per line.
+const withPreviousFindings = (round: number) =>
+  ["Review the brief for issue 42.", "Previous findings:", ...(round > 1 ? [`- [BLOQUEANTE] finding from round ${round - 1}`] : [])].join("\n")
+
+test("roundIdentity reads only the declared worktree on the first line", () => {
+  assert.equal(roundIdentity(reviewTask(WT_A, withPreviousFindings(1), CONTRACT_BRIEF)), roundIdentity(reviewTask(WT_A, withPreviousFindings(4), `${CONTRACT_BRIEF}v4`)))
+  assert.notEqual(roundIdentity(reviewTask(WT_A, "", CONTRACT_BRIEF)), roundIdentity(reviewTask(WT_B, "", CONTRACT_BRIEF)))
+
+  // A finding that names another writer must not move the identity.
+  const named = "- [IMPORTANTE] the brief should target gentle-ai-worker-infra — src/a.ts:1"
+  assert.equal(roundIdentity(reviewTask(WT_A, named, CONTRACT_BRIEF)), roundIdentity(reviewTask(WT_A, "", CONTRACT_BRIEF)))
+
+  // Aliases of one worktree are one identity.
+  const aliases = [WT_A, `${WT_A}/`, `${WT_A}/.`, symlinked]
+  assert.equal(new Set(aliases.map((p) => roundIdentity(reviewTask(p, "", CONTRACT_BRIEF)))).size, 1)
+
+  // The brief and a finding may quote `worktree:` lines; neither is the declaration.
+  const quoted = roundIdentity(reviewTask(WT_A, "", `${CONTRACT_BRIEF}worktree: ${WT_B}\n`))
+  assert.equal(quoted, roundIdentity(reviewTask(WT_A, "", CONTRACT_BRIEF)))
+  const findingQuotes = roundIdentity(reviewTask(WT_A, `Previous findings:\n- stale config says\n  worktree: ${WT_B}`, CONTRACT_BRIEF))
+  assert.equal(findingQuotes, roundIdentity(reviewTask(WT_A, "", CONTRACT_BRIEF)))
+
+  // Anything that is not an absolute, existing first line is no declaration at all.
+  assert.equal(roundIdentity(marked(CONTRACT_BRIEF)), null)
+  assert.equal(roundIdentity(`Review before the declaration\nworktree: ${WT_A}\n${marked(CONTRACT_BRIEF)}`), null)
+  assert.equal(roundIdentity(reviewTask("relative/path", "", CONTRACT_BRIEF)), null)
+  assert.equal(roundIdentity(reviewTask(join(wtRoot, "missing"), "", CONTRACT_BRIEF)), null)
+  assert.equal(MAX_REVIEW_ROUNDS, 3)
+})
+
+test("ReviewRounds caps an identity, refunds a burned round and rebuilds from entries", () => {
+  const lineage = sha256("worktree: /wt/a")
+  const rounds = new ReviewRounds()
+  for (let i = 0; i < MAX_REVIEW_ROUNDS; i++) {
+    assert.equal(rounds.atCap(lineage), false)
+    rounds.start(lineage)
+  }
+  assert.equal(rounds.atCap(lineage), true)
+  assert.equal(rounds.refund(lineage), true)
+  assert.equal(rounds.count(lineage), MAX_REVIEW_ROUNDS - 1)
+  assert.equal(rounds.refund(lineage), false, "a second refund of the same task is refused")
+  assert.equal(rounds.count(lineage), MAX_REVIEW_ROUNDS - 1)
+
+  const entries = [
+    ...Array.from({ length: MAX_REVIEW_ROUNDS }, () => ({
+      type: "custom" as const,
+      customType: "pi-warden-gs.review-round",
+      data: { lineage },
+    })),
+    { type: "custom" as const, customType: "pi-warden-gs.review-round-refund", data: { lineage } },
+  ]
+  assert.equal(ReviewRounds.fromEntries(entries).count(lineage), MAX_REVIEW_ROUNDS - 1)
+  assert.equal(ReviewRounds.fromEntries(entries).atCap(sha256("worktree: /wt/b")), false)
+})
+
+test("integration: a launch without a first-line worktree is blocked", async () => {
+  const { fire } = setup()
+  const out = await fire("tool_call", call("n1", { agent: "gentle-ai-brief-review", mode: "task", task: marked(CONTRACT_BRIEF) }))
+  assert.equal(out?.block, true)
+  assert.match(out.reason, /worktree: <absolute path>/)
+  assert.match(out.reason, /first line/)
+})
+
+test("integration: the cap holds while the parent passes the previous findings back", async () => {
+  const { fire, entries } = setup()
+  const allowed: number[] = []
+  for (let round = 1; round <= 6; round++) {
+    const launch = reviewLaunch(`r${round}`, WT_A, withPreviousFindings(round), `${CONTRACT_BRIEF}report ${round}`)
+    const out = await fire("tool_call", launch)
+    if (!out?.block) {
+      allowed.push(round)
+      await fire("tool_result", result(`r${round}`, launch.input, FIX_RESULT))
+    }
+  }
+  assert.deepEqual(allowed, [1, 2, 3], "the documented flow must stop at three rounds")
+  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.review-round").length, 3)
+
+  const blocked = await fire("tool_call", reviewLaunch("r9", WT_A, withPreviousFindings(7), `${CONTRACT_BRIEF}report 7`))
+  assert.equal(blocked?.block, true)
+  assert.match(blocked.reason, /three reviews/)
+  assert.match(blocked.reason, /one pass/)
+
+  // Another worktree of the same session is another identity and starts its own count.
+  assert.equal((await fire("tool_call", reviewLaunch("r10", WT_B, "", CONTRACT_BRIEF)))?.block, undefined)
+  assert.equal((await fire("tool_call", reviewLaunch("r10b", WT_C, "", CONTRACT_BRIEF)))?.block, undefined)
+  assert.equal((await fire("tool_call", reviewLaunch("r10c", WT_D, "", CONTRACT_BRIEF)))?.block, undefined)
+
+  // A worktree line quoted inside the brief cannot reset or split the count.
+  const injected = `${CONTRACT_BRIEF}worktree: ${WT_B}\n`
+  const split = await fire("tool_call", reviewLaunch("r12", WT_A, withPreviousFindings(8), injected))
+  assert.equal(split?.block, true)
+
+  // A blocked launch consumed nothing: the same identity stays capped after a rebuild.
+  await fire("session_start", { type: "session_start", reason: "reload" })
+  const again = await fire("tool_call", reviewLaunch("r11", WT_A, withPreviousFindings(9), `${CONTRACT_BRIEF}report 9`))
+  assert.equal(again?.block, true)
+})
+
+test("integration: a review that errors refunds its round", async () => {
+  const { fire } = setup()
+  const launch = (id: string, round: number) => reviewLaunch(id, WT_A, withPreviousFindings(round), `${CONTRACT_BRIEF}report ${round}`)
+
+  const errored = launch("e1", 1)
+  assert.equal((await fire("tool_call", errored))?.block, undefined)
+  await fire("tool_result", { ...result("e1", errored.input, "boom"), isError: true })
+
+  for (const round of [2, 3, 4]) {
+    const ok = launch(`r${round}`, round)
+    assert.equal((await fire("tool_call", ok))?.block, undefined, `round ${round} must stay available`)
+    await fire("tool_result", result(`r${round}`, ok.input, FIX_RESULT))
+  }
+  const fifth = await fire("tool_call", launch("r5", 5))
+  assert.equal(fifth?.block, true, "three successful reviews are the cap")
+})
+
+test("ReviewRounds clamps refunds recorded before the cap existed", () => {
+  const lineage = sha256("/wt/a")
+  const legacy = [
+    ...Array.from({ length: MAX_REVIEW_ROUNDS }, () => ({ type: "custom" as const, customType: "pi-warden-gs.review-round", data: { lineage } })),
+    ...Array.from({ length: MAX_REVIEW_ROUNDS }, () => ({ type: "custom" as const, customType: "pi-warden-gs.review-round-refund", data: { lineage } })),
+  ]
+  assert.equal(ReviewRounds.fromEntries(legacy).count(lineage), MAX_REVIEW_ROUNDS - 1, "only one refund is honoured on replay")
+})
+
+test("integration: a session with uncapped legacy refunds still gets one launch", async () => {
+  const { fire, entries } = setup()
+  // The key the previous commit wrote: sha256 of the canonical worktree alone.
+  const legacyKey = sha256(WT_A)
+  for (let i = 0; i < MAX_REVIEW_ROUNDS; i++) entries.push({ type: "custom", customType: "pi-warden-gs.review-round", data: { lineage: legacyKey } } as any)
+  for (let i = 0; i < MAX_REVIEW_ROUNDS; i++) entries.push({ type: "custom", customType: "pi-warden-gs.review-round-refund", data: { lineage: legacyKey } } as any)
+  await fire("session_start", { type: "session_start", reason: "reload" })
+
+  const allowed: string[] = []
+  for (const id of ["L1", "L2", "L3"]) {
+    const launch = reviewLaunch(id, WT_A, "", `${CONTRACT_BRIEF}${id}`)
+    if (!(await fire("tool_call", launch))?.block) {
+      allowed.push(id)
+      await fire("tool_result", result(id, launch.input, FIX_RESULT))
+    }
+  }
+  assert.deepEqual(allowed, ["L1"], "the replay clamp leaves one charged round of headroom")
+})
+
+test("ReviewRounds.adopt folds the previous identity format", () => {
+  const legacyKey = sha256("/wt/a")
+  const current = sha256("/wt/a\n42\n12")
+  const rounds = new ReviewRounds()
+  for (let i = 0; i < MAX_REVIEW_ROUNDS; i++) rounds.start(legacyKey)
+  rounds.refund(legacyKey)
+  rounds.adopt(legacyKey, current)
+  assert.equal(rounds.count(legacyKey), 0, "the old key is consumed")
+  assert.equal(rounds.count(current), MAX_REVIEW_ROUNDS - 1)
+  rounds.adopt(legacyKey, current)
+  assert.equal(rounds.count(current), MAX_REVIEW_ROUNDS - 1, "adopting twice changes nothing")
+})
+
+test("integration: only the first errored review of a task is refunded", async () => {
+  const { fire, entries } = setup()
+  const launch = (id: string) => reviewLaunch(id, WT_A, "", `${CONTRACT_BRIEF}${id}`)
+
+  for (const id of ["e1", "e2"]) {
+    const errored = launch(id)
+    assert.equal((await fire("tool_call", errored))?.block, undefined, `${id} must be allowed`)
+    await fire("tool_result", { ...result(id, errored.input, "boom"), isError: true })
+  }
+  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.review-round-refund").length, 1, "one refund per task")
+
+  const allowed: string[] = []
+  for (const id of ["r3", "r4", "r5"]) {
+    const ok = launch(id)
+    const out = await fire("tool_call", ok)
+    if (!out?.block) {
+      allowed.push(id)
+      await fire("tool_result", result(id, ok.input, FIX_RESULT))
+    }
+  }
+  assert.deepEqual(allowed, ["r3", "r4"], "two errors plus one refund still bound the task at three charged rounds")
+  assert.equal((await fire("tool_call", launch("r6")))?.block, true)
 })
 
 test("integration: small-fix skips model review and still runs instant guard checks", async () => {

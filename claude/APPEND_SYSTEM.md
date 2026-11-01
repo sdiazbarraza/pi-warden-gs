@@ -97,10 +97,13 @@ that installs them. Project rules belong in each project's `CLAUDE.md`.
   prompt (the brief, plus any context, joined by one blank line). safety-guard
   hashes both and blocks any launch whose exact brief was not approved.
   Approvals are single-use: any edit, or a second launch, needs a new review.
-- `VERDICT: FIX`: correct the brief and its inputs and review again. Stop
-  and show the human the findings only when a `FIX` repeats a finding from
-  an earlier review of the same brief, or after the third review; new minor
-  findings are fixed without asking. `VERDICT: APPROVE`:
+- `VERDICT: FIX`: fix every finding from that review in one pass, with the
+  inputs those findings depend on, and relaunch once. Pass the previous
+  findings back to the reviewer verbatim, one per line, so it classifies each
+  one as `CLOSED`, `OPEN` or `NEW`. Stop and show the human the findings when a
+  `FIX` repeats a finding from an earlier review of the same brief or when the
+  third review still returns `FIX`; new minor findings are fixed without
+  asking. `VERDICT: APPROVE`:
   launch the identical text without showing it unless the human asked to
   see it; report the verdict in one line.
 - Never send new instructions to a running writer agent (the `SendMessage`
