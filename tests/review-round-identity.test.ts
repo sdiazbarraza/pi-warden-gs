@@ -7,7 +7,7 @@ import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import guard, { declaredWorktree, roundIdentity } from "../extensions/safety-guard.ts"
+import guard, { declaredReviewScope, declaredWorktree, roundIdentity } from "../extensions/safety-guard.ts"
 
 const CONTRACT_BRIEF = `## Objective
 Do it
@@ -82,7 +82,8 @@ const result = (id: string, input: any, text: string, isError = false) => ({
 const FIX_RESULT = 'Subagent gentle-ai-brief-review (task r1, "x") finished.\n\n- [IMPORTANTE] x\nVERDICT: FIX'
 const APPROVE_RESULT = 'Subagent gentle-ai-brief-review (task r1, "x") finished.\n\nok\nVERDICT: APPROVE'
 const marked = (body: string) => `<<<BRIEF\n${body}\nBRIEF>>>`
-const reviewTask = (worktreePath: string, body: string) => `worktree: ${worktreePath}\n${body}`
+const reviewTask = (worktreePath: string, body: string, scope = "") =>
+  `worktree: ${worktreePath}${scope}\n${body}`
 const reviewLaunch = (id: string, worktreePath: string, body: string) =>
   call(id, { agent: "gentle-ai-brief-review", mode: "task", task: reviewTask(worktreePath, body) })
 const roundsOf = (entries: Array<{ customType: string }>) =>
@@ -161,4 +162,50 @@ test("the documented flow: a declared worktree reviews, approves and dispatches 
   const second = await fire("tool_call", call("w2", worker))
   assert.equal(second?.block, true)
   assert.match(second.reason, /brief not approved/)
+})
+
+test("sibling subissues of one worktree have separate budgets", async () => {
+  const { fire } = setup()
+  for (let round = 1; round <= 3; round++) {
+    const launch = call(`s${round}`, {
+      agent: "gentle-ai-brief-review",
+      mode: "task",
+      task: reviewTask(WT_A, marked(`${CONTRACT_BRIEF}s${round}`), " issue: 42 subissue: 12"),
+    })
+    assert.equal((await fire("tool_call", launch))?.block, undefined, `round ${round}`)
+    await fire("tool_result", result(`s${round}`, launch.input, FIX_RESULT))
+  }
+  const capped = call("s4", {
+    agent: "gentle-ai-brief-review",
+    mode: "task",
+    task: reviewTask(WT_A, marked(CONTRACT_BRIEF), " issue: 42 subissue: 12"),
+  })
+  assert.equal((await fire("tool_call", capped))?.block, true, "the same subissue stops at three")
+
+  const sibling = call("s5", {
+    agent: "gentle-ai-brief-review",
+    mode: "task",
+    task: reviewTask(WT_A, marked(CONTRACT_BRIEF), " issue: 42 subissue: 13"),
+  })
+  assert.equal((await fire("tool_call", sibling))?.block, undefined, "a sibling subissue starts fresh")
+})
+
+test("the declaration reads worktree, issue and subissue, and falls back in that order", () => {
+  const full = declaredReviewScope(reviewTask(WT_A, marked(CONTRACT_BRIEF), " issue: 42 subissue: 12"))
+  assert.deepEqual(full, { worktree: WT_A, issue: "42", subissue: "12" })
+
+  const issueOnly = declaredReviewScope(reviewTask(WT_A, marked(CONTRACT_BRIEF), " issue: 42"))
+  assert.deepEqual(issueOnly, { worktree: WT_A, issue: "42", subissue: null })
+  assert.notEqual(roundIdentity(reviewTask(WT_A, marked(CONTRACT_BRIEF), " issue: 42")), roundIdentity(reviewTask(WT_A, marked(CONTRACT_BRIEF), " issue: 43")))
+
+  const worktreeOnly = declaredReviewScope(reviewTask(WT_A, marked(CONTRACT_BRIEF)))
+  assert.deepEqual(worktreeOnly, { worktree: WT_A, issue: null, subissue: null })
+  assert.equal(roundIdentity(reviewTask(WT_A, marked(CONTRACT_BRIEF))), roundIdentity(reviewTask(WT_A, marked(`${CONTRACT_BRIEF}v2`))))
+})
+
+test("a worktree path with spaces is one declaration", () => {
+  const spaced = worktree("repo con espacios")
+  const scope = declaredReviewScope(reviewTask(spaced, marked(CONTRACT_BRIEF), " issue: 7 subissue: 2"))
+  assert.deepEqual(scope, { worktree: spaced, issue: "7", subissue: "2" })
+  assert.equal(roundIdentity(reviewTask(spaced, marked(CONTRACT_BRIEF), " issue: 7 subissue: 2")), roundIdentity(reviewTask(spaced, marked(`${CONTRACT_BRIEF}v2`), " issue: 7 subissue: 2")))
 })

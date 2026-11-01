@@ -241,12 +241,14 @@ Writer subagents (`gentle-ai-worker`, `gentle-ai-worker-infra`) only start with 
    model review starts.
 3. On `VERDICT: APPROVE` the sha256 of the normalized brief (CRLF → LF, trimmed) becomes a session
    entry, an approval.
-4. A reviewer launch declares its worktree on the FIRST line of its task, exactly
-   `worktree: <absolute path>`; safety-guard blocks a launch without it. That path, canonicalized,
-   is the round identity: a worktree gets at most three model reviews, the fourth launch is blocked,
-   and a review that ends in an error gives its round back. The brief, the context and the previous
-   findings never enter the key, so a corrected brief keeps the same count, and a `worktree:` line
-   quoted inside a brief cannot redirect it.
+4. A reviewer launch declares its task on the FIRST line: `worktree: <absolute path>` plus
+   `issue: <id>` and `subissue: <id>` when they exist; safety-guard blocks a launch without it.
+   That declared scope, canonicalized, is the round identity: a task gets at most three model
+   reviews, the fourth launch is blocked, and a review that ends in an error gives its round back
+   once per task: an always-failing reviewer cannot retry for free.
+   Sibling subissues of one worktree each get their own budget. The brief, the context and the
+   previous findings never enter the key, so a corrected brief keeps the same count, and a
+   `worktree:` line quoted inside a brief cannot redirect it.
 5. Launching a writer consumes that approval for byte-identical text (task plus context). Approvals
    are single-use: any edit needs a new review.
 6. Before the approval is consumed, `hooks/brief-guard.sh` checks the structure and the extra

@@ -11,7 +11,7 @@ You review one worker brief before the parent launches it. You start with no con
 
 - The exact brief text, inline between a line `<<<BRIEF` and a line `BRIEF>>>`. Review only that text; never look for a brief file.
 - Worktree path and issue number.
-- Worktree path on the FIRST line of the task, exactly `worktree: <absolute path>`: safety-guard reads it as the round identity of the three-review cap and blocks a launch without it.
+- Task scope on the FIRST line of the task: `worktree: <absolute path>` and, when they exist, `issue: <id>` and `subissue: <id>`. safety-guard reads it as the round identity of the three-review cap and blocks a launch without it.
 - Optional: corrections the human already requested for this brief.
 - Optional: the Engram observation ID of the refined request for this feature.
 - Optional: the previous findings of this brief, one per line, exactly as you returned them. When they are present you report on each of them instead of reviewing from scratch.

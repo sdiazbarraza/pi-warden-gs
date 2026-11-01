@@ -647,12 +647,10 @@ test("ReviewRounds caps an identity, refunds a burned round and rebuilds from en
     rounds.start(lineage)
   }
   assert.equal(rounds.atCap(lineage), true)
-  rounds.refund(lineage)
+  assert.equal(rounds.refund(lineage), true)
   assert.equal(rounds.count(lineage), MAX_REVIEW_ROUNDS - 1)
-  rounds.refund(lineage)
-  rounds.refund(lineage)
-  rounds.refund(lineage)
-  assert.equal(rounds.count(lineage), 0, "a refund never goes below zero")
+  assert.equal(rounds.refund(lineage), false, "a second refund of the same task is refused")
+  assert.equal(rounds.count(lineage), MAX_REVIEW_ROUNDS - 1)
 
   const entries = [
     ...Array.from({ length: MAX_REVIEW_ROUNDS }, () => ({
@@ -724,6 +722,71 @@ test("integration: a review that errors refunds its round", async () => {
   }
   const fifth = await fire("tool_call", launch("r5", 5))
   assert.equal(fifth?.block, true, "three successful reviews are the cap")
+})
+
+test("ReviewRounds clamps refunds recorded before the cap existed", () => {
+  const lineage = sha256("/wt/a")
+  const legacy = [
+    ...Array.from({ length: MAX_REVIEW_ROUNDS }, () => ({ type: "custom" as const, customType: "pi-warden-gs.review-round", data: { lineage } })),
+    ...Array.from({ length: MAX_REVIEW_ROUNDS }, () => ({ type: "custom" as const, customType: "pi-warden-gs.review-round-refund", data: { lineage } })),
+  ]
+  assert.equal(ReviewRounds.fromEntries(legacy).count(lineage), MAX_REVIEW_ROUNDS - 1, "only one refund is honoured on replay")
+})
+
+test("integration: a session with uncapped legacy refunds still gets one launch", async () => {
+  const { fire, entries } = setup()
+  // The key the previous commit wrote: sha256 of the canonical worktree alone.
+  const legacyKey = sha256(WT_A)
+  for (let i = 0; i < MAX_REVIEW_ROUNDS; i++) entries.push({ type: "custom", customType: "pi-warden-gs.review-round", data: { lineage: legacyKey } } as any)
+  for (let i = 0; i < MAX_REVIEW_ROUNDS; i++) entries.push({ type: "custom", customType: "pi-warden-gs.review-round-refund", data: { lineage: legacyKey } } as any)
+  await fire("session_start", { type: "session_start", reason: "reload" })
+
+  const allowed: string[] = []
+  for (const id of ["L1", "L2", "L3"]) {
+    const launch = reviewLaunch(id, WT_A, "", `${CONTRACT_BRIEF}${id}`)
+    if (!(await fire("tool_call", launch))?.block) {
+      allowed.push(id)
+      await fire("tool_result", result(id, launch.input, FIX_RESULT))
+    }
+  }
+  assert.deepEqual(allowed, ["L1"], "the replay clamp leaves one charged round of headroom")
+})
+
+test("ReviewRounds.adopt folds the previous identity format", () => {
+  const legacyKey = sha256("/wt/a")
+  const current = sha256("/wt/a\n42\n12")
+  const rounds = new ReviewRounds()
+  for (let i = 0; i < MAX_REVIEW_ROUNDS; i++) rounds.start(legacyKey)
+  rounds.refund(legacyKey)
+  rounds.adopt(legacyKey, current)
+  assert.equal(rounds.count(legacyKey), 0, "the old key is consumed")
+  assert.equal(rounds.count(current), MAX_REVIEW_ROUNDS - 1)
+  rounds.adopt(legacyKey, current)
+  assert.equal(rounds.count(current), MAX_REVIEW_ROUNDS - 1, "adopting twice changes nothing")
+})
+
+test("integration: only the first errored review of a task is refunded", async () => {
+  const { fire, entries } = setup()
+  const launch = (id: string) => reviewLaunch(id, WT_A, "", `${CONTRACT_BRIEF}${id}`)
+
+  for (const id of ["e1", "e2"]) {
+    const errored = launch(id)
+    assert.equal((await fire("tool_call", errored))?.block, undefined, `${id} must be allowed`)
+    await fire("tool_result", { ...result(id, errored.input, "boom"), isError: true })
+  }
+  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.review-round-refund").length, 1, "one refund per task")
+
+  const allowed: string[] = []
+  for (const id of ["r3", "r4", "r5"]) {
+    const ok = launch(id)
+    const out = await fire("tool_call", ok)
+    if (!out?.block) {
+      allowed.push(id)
+      await fire("tool_result", result(id, ok.input, FIX_RESULT))
+    }
+  }
+  assert.deepEqual(allowed, ["r3", "r4"], "two errors plus one refund still bound the task at three charged rounds")
+  assert.equal((await fire("tool_call", launch("r6")))?.block, true)
 })
 
 test("integration: small-fix skips model review and still runs instant guard checks", async () => {

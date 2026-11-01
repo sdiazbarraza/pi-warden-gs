@@ -48,6 +48,7 @@ const WRITER_TASK = "pi-warden-gs.writer-task"
 const REVIEW_ROUND = "pi-warden-gs.review-round"
 const REVIEW_ROUND_REFUND = "pi-warden-gs.review-round-refund"
 export const MAX_REVIEW_ROUNDS = 3
+export const MAX_REVIEW_REFUNDS = 1
 
 function resolveBriefGuard(): string {
   const override = process.env.PI_WARDEN_GS_BRIEF_GUARD
@@ -287,10 +288,14 @@ export function writerAgentOfReviewTask(task: string): string {
   return "gentle-ai-worker"
 }
 
-// Round identity of a review: the worktree the launch declares on its first line, canonicalized.
-// Nothing else enters the key: the brief and the previous findings change on every round, the
-// writer is never read from free text (a finding can name another agent), and the declaration is
-// read only from the first line so neither the brief nor a finding can redirect or split the count.
+// Round identity of a review: the scope the launch declares on its FIRST line, canonicalized:
+// `worktree: <absolute path> [issue: <id>] [subissue: <id>]`. The task unit of the harness is the
+// subissue, so sibling subissues of one worktree each get their own budget. Nothing else enters the
+// key: the brief and the previous findings change on every round, the writer is never read from free
+// text (a finding can name another agent), and only the first line declares, so neither the brief nor
+// a finding can redirect or split the count.
+export type ReviewScope = { worktree: string; issue: string | null; subissue: string | null }
+
 function canonicalPath(value: string): string {
   try {
     return realpathSync(value)
@@ -299,36 +304,63 @@ function canonicalPath(value: string): string {
   }
 }
 
-/** The `worktree: <absolute path>` declaration on the first line of a reviewer task, if any. */
-export function declaredWorktree(task: string): string | null {
-  const first = task.replace(/\r\n/g, "\n").split("\n")[0] ?? ""
-  const m = /^worktree:[ \t]*(\S.*)$/.exec(first)
+/** The scope a reviewer launch declares on its first line, or null when it declares none. */
+export function declaredReviewScope(task: string): ReviewScope | null {
+  const first = (task.replace(/\r\n/g, "\n").split("\n")[0] ?? "").trimEnd()
+  const m = /^worktree:[ \t]*(.+?)(?:[ \t]+issue:[ \t]*(\S+))?(?:[ \t]+subissue:[ \t]*(\S+))?$/.exec(first)
   if (!m) return null
   const value = m[1].trim().replace(/^[`"']+|[`"']+$/g, "")
-  if (!value || !isAbsolute(value)) return null
-  if (!existsSync(value)) return null
-  return canonicalPath(value)
+  if (!value || !isAbsolute(value) || !existsSync(value)) return null
+  return { worktree: canonicalPath(value), issue: m[2] ?? null, subissue: m[3] ?? null }
 }
 
 /** The canonical worktree of a reviewer launch, or null when the launch does not declare one. */
+export function declaredWorktree(task: string): string | null {
+  return declaredReviewScope(task)?.worktree ?? null
+}
+
+/** The round identity: worktree plus the issue and subissue the launch declares, when it does. */
 export function roundIdentity(task: string): string | null {
-  const worktree = declaredWorktree(task)
-  return worktree === null ? null : sha256(worktree)
+  const scope = declaredReviewScope(task)
+  if (!scope) return null
+  return sha256([scope.worktree, scope.issue ?? "", scope.subissue ?? ""].join("\n"))
 }
 
 export class ReviewRounds {
   private counts = new Map<string, number>()
+  private refunds = new Map<string, number>()
   start(lineage: string): void {
     this.counts.set(lineage, (this.counts.get(lineage) ?? 0) + 1)
   }
   count(lineage: string): number {
     return this.counts.get(lineage) ?? 0
   }
-  // A review that errored produced no findings, so its round is given back.
-  refund(lineage: string): void {
+  // A review that errored produced no findings, so its round is given back, at most
+  // MAX_REVIEW_REFUNDS times per task: an always-failing reviewer cannot retry for free.
+  refund(lineage: string): boolean {
+    if (this.count(lineage) <= 0) return false
+    if ((this.refunds.get(lineage) ?? 0) >= MAX_REVIEW_REFUNDS) return false
+    this.refunds.set(lineage, (this.refunds.get(lineage) ?? 0) + 1)
+    this.applyRefund(lineage)
+    return true
+  }
+  // Rounds recorded under the previous identity format (sha256 of the canonical worktree alone,
+  // written before the scope included issue and subissue) are folded into the current key, so an
+  // upgrade cannot hand out a fresh budget.
+  adopt(from: string, to: string): void {
+    if (from === to) return
+    const moved = this.counts.get(from) ?? 0
+    if (moved > 0) this.counts.set(to, (this.counts.get(to) ?? 0) + moved)
+    this.counts.delete(from)
+    const refunded = Math.min(this.refunds.get(from) ?? 0, MAX_REVIEW_REFUNDS)
+    if (refunded > 0) {
+      this.refunds.set(to, Math.min((this.refunds.get(to) ?? 0) + refunded, MAX_REVIEW_REFUNDS))
+    }
+    this.refunds.delete(from)
+  }
+  private applyRefund(lineage: string): void {
     const n = this.count(lineage)
-    if (n <= 0) return
-    if (n === 1) this.counts.delete(lineage)
+    if (n <= 1) this.counts.delete(lineage)
     else this.counts.set(lineage, n - 1)
   }
   atCap(lineage: string): boolean {
@@ -341,6 +373,8 @@ export class ReviewRounds {
       const lineage = dataField(e, "lineage")
       if (!lineage) continue
       if (e.customType === REVIEW_ROUND) rounds.start(lineage)
+      // Replay applies the same rules as a live refund, so a session written before the cap
+      // existed still gets at most MAX_REVIEW_REFUNDS refunds per task.
       else rounds.refund(lineage)
     }
     return rounds
@@ -441,9 +475,9 @@ const NOT_APPROVED =
 const WRITER_FOLLOWUP =
   "safety-guard: new instructions to a writer task are blocked; launch a new reviewed brief instead."
 const REVIEW_ROUNDS_BLOCKED =
-  "safety-guard: this worktree already used three reviews of a worker brief. Fix every finding from the last review in one pass before relaunching; three reviews per worktree are the limit, and an errored review gives its round back."
+  "safety-guard: this task already used three reviews of a worker brief. Fix every finding from the last review in one pass before relaunching; three reviews per declared task (worktree, issue and subissue) are the limit, and one errored review per task gives its round back."
 const WORKTREE_REQUIRED =
-  "safety-guard: start the reviewer task with `worktree: <absolute path>` as its first line, pointing at the existing worktree under review. That line is the round identity of the three-review cap, so it must not come from the brief, a finding or the context."
+  "safety-guard: start the reviewer task with `worktree: <absolute path>` on its first line, optionally followed by `issue: <id>` and `subissue: <id>` (for example `worktree: /repo-feat issue: 42 subissue: 12`). That line is the round identity of the three-review cap, so it must not come from the brief, a finding or the context."
 
 export default function (
   pi: ExtensionAPI,
@@ -532,8 +566,10 @@ export default function (
             text(input.workspace_root) || text(input.repository_root) || text((ctx as { cwd?: unknown }).cwd) || process.cwd()
           const rejection = briefRejection(writerAgentOfReviewTask(task), marked, cwd)
           if (rejection) return { block: true, reason: rejection }
+          const scope = declaredReviewScope(task)
           const lineage = roundIdentity(task)
-          if (lineage === null) return { block: true, reason: WORKTREE_REQUIRED }
+          if (!scope || !lineage) return { block: true, reason: WORKTREE_REQUIRED }
+          rounds.adopt(sha256(scope.worktree), lineage)
           if (rounds.atCap(lineage)) return { block: true, reason: REVIEW_ROUNDS_BLOCKED }
           rounds.start(lineage)
           pi.appendEntry(REVIEW_ROUND, { lineage, at: new Date().toISOString() })
@@ -587,8 +623,9 @@ export default function (
         pendingReviews.delete(event.toolCallId)
         if (!pending) return
         if (event.isError) {
-          rounds.refund(pending.lineage)
-          pi.appendEntry(REVIEW_ROUND_REFUND, { lineage: pending.lineage, at: new Date().toISOString() })
+          if (rounds.refund(pending.lineage)) {
+            pi.appendEntry(REVIEW_ROUND_REFUND, { lineage: pending.lineage, at: new Date().toISOString() })
+          }
           return
         }
         const body = (event.content ?? [])

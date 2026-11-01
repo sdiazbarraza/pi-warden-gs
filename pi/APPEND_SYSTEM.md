@@ -100,11 +100,12 @@ gentle-pi. Project rules belong in each project's AGENTS.md.
 - `VERDICT: FIX`: fix every finding from that review in one pass, with the
   inputs those findings depend on, and relaunch once. Pass the previous
   findings back to the reviewer verbatim, one per line, so it classifies each
-  one as `CLOSED`, `OPEN` or `NEW`. Every reviewer launch declares its worktree
-  on its FIRST line, exactly `worktree: <absolute path>`: that canonical path
-  is the round identity, and safety-guard blocks a launch without it. A
-  worktree gets at most three reviews; safety-guard blocks the fourth launch of
-  the same worktree, and a review that ends in an error gives its round back.
+  one as `CLOSED`, `OPEN` or `NEW`. Every reviewer launch declares its task on
+  its FIRST line: `worktree: <absolute path>` and, when they exist,
+  `issue: <id>` and `subissue: <id>`. That declared scope is the round identity,
+  and safety-guard blocks a launch without it. A task gets at most
+  three reviews; safety-guard blocks the fourth launch of the same task, and a
+  review that ends in an error gives its round back once per task.
   The brief, the context and the previous findings never set the identity, so a
   corrected brief keeps its count. Stop and show the human the findings when a
   `FIX` repeats a finding from an earlier review of the same brief, when the
