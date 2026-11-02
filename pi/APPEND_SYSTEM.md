@@ -96,7 +96,8 @@ gentle-pi. Project rules belong in each project's AGENTS.md.
 - The text between the markers must be byte-identical to the later launch's
   `task` (plus `context`, joined by one blank line). safety-guard hashes
   both and blocks any launch whose exact brief was not approved. Approvals
-  are single-use: any edit, or a second launch, needs a new review.
+  are single-use: any edit, or a second launch, needs a new review, or the
+  human approval described below when the review budget is spent.
 - `VERDICT: FIX`: fix every finding from that review in one pass, with the
   inputs those findings depend on, and relaunch once. Pass the previous
   findings back to the reviewer verbatim, one per line, so it classifies each
@@ -105,7 +106,14 @@ gentle-pi. Project rules belong in each project's AGENTS.md.
   `issue: <id>` and `subissue: <id>`. That declared scope is the round identity,
   and safety-guard blocks a launch without it. A task gets at most
   three reviews; safety-guard blocks the fourth launch of the same task, and a
-  review that ends in an error gives its round back once per task.
+  review that ends in an error gives its round back once per task. When the cap
+  blocks the launch and you have already fixed every open finding in one pass,
+  ask the human. If the human approves that exact brief, relaunch the reviewer
+  with the line `<!-- review: human-approved -->` immediately after the scope
+  line: no review runs, no round is charged, and that exact brief becomes the
+  writer's approval. One human approval per task, never more. Use it only with
+  the human's explicit approval and only on a brief whose findings you already
+  fixed.
   The brief, the context and the previous findings never set the identity, so a
   corrected brief keeps its count. Stop and show the human the findings when a
   `FIX` repeats a finding from an earlier review of the same brief, when the

@@ -47,6 +47,8 @@ const APPROVAL_USED = "pi-warden-gs.brief-approval-used"
 const WRITER_TASK = "pi-warden-gs.writer-task"
 const REVIEW_ROUND = "pi-warden-gs.review-round"
 const REVIEW_ROUND_REFUND = "pi-warden-gs.review-round-refund"
+const HUMAN_APPROVAL = "<!-- review: human-approved -->"
+const HUMAN_APPROVAL_ENTRY = "pi-warden-gs.human-approval"
 export const MAX_REVIEW_ROUNDS = 3
 export const MAX_REVIEW_REFUNDS = 1
 
@@ -314,6 +316,16 @@ export function declaredReviewScope(task: string): ReviewScope | null {
   return { worktree: canonicalPath(value), issue: m[2] ?? null, subissue: m[3] ?? null }
 }
 
+/**
+ * The human decision that ends an exhausted review loop: the exact line
+ * `<!-- review: human-approved -->` immediately after the scope declaration. It never buys another
+ * review round; at the cap it approves that exact brief, so the writer can start without one.
+ */
+export function hasHumanApproval(task: string): boolean {
+  const lines = task.replace(/\r\n/g, "\n").split("\n")
+  return (lines[1] ?? "").trim() === HUMAN_APPROVAL
+}
+
 /** The canonical worktree of a reviewer launch, or null when the launch does not declare one. */
 export function declaredWorktree(task: string): string | null {
   return declaredReviewScope(task)?.worktree ?? null
@@ -324,6 +336,25 @@ export function roundIdentity(task: string): string | null {
   const scope = declaredReviewScope(task)
   if (!scope) return null
   return sha256([scope.worktree, scope.issue ?? "", scope.subissue ?? ""].join("\n"))
+}
+
+// One human approval per task: the exhausted loop ends once, not once per relaunch.
+export class HumanApprovals {
+  private used = new Set<string>()
+  use(lineage: string): boolean {
+    if (this.used.has(lineage)) return false
+    this.used.add(lineage)
+    return true
+  }
+  static fromEntries(entries: Entry[]): HumanApprovals {
+    const approvals = new HumanApprovals()
+    for (const e of entries) {
+      if (e.customType !== HUMAN_APPROVAL_ENTRY) continue
+      const lineage = dataField(e, "lineage")
+      if (lineage) approvals.use(lineage)
+    }
+    return approvals
+  }
 }
 
 export class ReviewRounds {
@@ -476,6 +507,8 @@ const WRITER_FOLLOWUP =
   "safety-guard: new instructions to a writer task are blocked; launch a new reviewed brief instead."
 const REVIEW_ROUNDS_BLOCKED =
   "safety-guard: this task already used three reviews of a worker brief. Fix every finding from the last review in one pass before relaunching; three reviews per declared task (worktree, issue and subissue) are the limit, and one errored review per task gives its round back."
+const HUMAN_APPROVED_DISPATCH =
+  "safety-guard: this task already used its three reviews and the human approved this exact brief. No review ran and no round was charged; launch the writer now with the identical brief text."
 const WORKTREE_REQUIRED =
   "safety-guard: start the reviewer task with `worktree: <absolute path>` on its first line, optionally followed by `issue: <id>` and `subissue: <id>` (for example `worktree: /repo-feat issue: 42 subissue: 12`). That line is the round identity of the three-review cap, so it must not come from the brief, a finding or the context."
 
@@ -487,6 +520,7 @@ export default function (
   let approvals = new ApprovalStore()
   let writerTasks = new WriterTasks()
   let rounds = new ReviewRounds()
+  let humanApprovals = new HumanApprovals()
   const pendingReviews = new Map<string, { hash: string; lineage: string }>()
 
   const rebuild = (ctx: unknown) => {
@@ -495,6 +529,7 @@ export default function (
       approvals = ApprovalStore.fromEntries(entries)
       writerTasks = WriterTasks.fromEntries(entries)
       rounds = ReviewRounds.fromEntries(entries)
+      humanApprovals = HumanApprovals.fromEntries(entries)
     } catch (err) {
       console.warn("[safety-guard] could not rebuild state from the session", err)
     }
@@ -570,7 +605,18 @@ export default function (
           const lineage = roundIdentity(task)
           if (!scope || !lineage) return { block: true, reason: WORKTREE_REQUIRED }
           rounds.adopt(sha256(scope.worktree), lineage)
-          if (rounds.atCap(lineage)) return { block: true, reason: REVIEW_ROUNDS_BLOCKED }
+          if (rounds.atCap(lineage)) {
+            // The loop is exhausted. A human decision ends it by approving this exact brief
+            // instead of paying for a fourth review: no round is charged and no review runs.
+            if (hasHumanApproval(task) && humanApprovals.use(lineage)) {
+              const hash = sha256(marked)
+              approvals.add(hash)
+              pi.appendEntry(HUMAN_APPROVAL_ENTRY, { lineage, at: new Date().toISOString() })
+              pi.appendEntry(APPROVAL, { sha256: hash, at: new Date().toISOString(), source: "human" })
+              return { block: true, reason: HUMAN_APPROVED_DISPATCH }
+            }
+            return { block: true, reason: REVIEW_ROUNDS_BLOCKED }
+          }
           rounds.start(lineage)
           pi.appendEntry(REVIEW_ROUND, { lineage, at: new Date().toISOString() })
           pendingReviews.set(event.toolCallId, { hash: sha256(marked), lineage })

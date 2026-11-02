@@ -16,6 +16,7 @@ import guard, {
   destructiveMatch,
   isPublisherProcess,
   extractMarkedBrief,
+  hasHumanApproval,
   isSmallFixExempt,
   MAX_REVIEW_ROUNDS,
   ReviewRounds,
@@ -787,6 +788,72 @@ test("integration: only the first errored review of a task is refunded", async (
   }
   assert.deepEqual(allowed, ["r3", "r4"], "two errors plus one refund still bound the task at three charged rounds")
   assert.equal((await fire("tool_call", launch("r6")))?.block, true)
+})
+
+const HUMAN_APPROVED = "<!-- review: human-approved -->"
+const humanLaunch = (id: string, body: string) =>
+  call(id, { agent: "gentle-ai-brief-review", mode: "task", task: `worktree: ${WT_A}\n${HUMAN_APPROVED}\n${body}` })
+
+test("hasHumanApproval reads the line right after the scope declaration", () => {
+  assert.equal(hasHumanApproval(`worktree: ${WT_A}\n${HUMAN_APPROVED}\nbody`), true)
+  assert.equal(hasHumanApproval(`worktree: ${WT_A}\nbody\n${HUMAN_APPROVED}`), false)
+  assert.equal(hasHumanApproval(`${HUMAN_APPROVED}\nworktree: ${WT_A}`), false)
+})
+
+test("integration: a human-approved launch at the cap approves the brief without a review", async () => {
+  const { fire, entries } = setup()
+  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+    const launch = reviewLaunch(`r${round}`, WT_A, "", `${CONTRACT_BRIEF}report ${round}`)
+    assert.equal((await fire("tool_call", launch))?.block, undefined)
+    await fire("tool_result", result(`r${round}`, launch.input, FIX_RESULT))
+  }
+  const roundsBefore = entries.filter((e) => e.customType === "pi-warden-gs.review-round").length
+
+  const approved = await fire("tool_call", humanLaunch("h1", `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
+  assert.equal(approved?.block, true, "the reviewer does not run")
+  assert.match(approved.reason, /human approved/)
+  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.review-round").length, roundsBefore, "no round is charged")
+  const human = entries.filter((e) => e.customType === "pi-warden-gs.brief-approval")
+  assert.equal(human.length, 1)
+  assert.equal((human[0].data as { source?: string }).source, "human")
+
+  const writer = { agent: "gentle-ai-worker", mode: "task", task: CONTRACT_BRIEF }
+  assert.equal((await fire("tool_call", call("w1", writer)))?.block, undefined, "the approved brief dispatches the writer")
+  assert.equal((await fire("tool_call", call("w2", writer)))?.block, true, "still single use")
+})
+
+test("integration: the human approval is one per task", async () => {
+  const { fire, entries } = setup()
+  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+    const launch = reviewLaunch(`r${round}`, WT_A, "", `${CONTRACT_BRIEF}report ${round}`)
+    await fire("tool_call", launch)
+    await fire("tool_result", result(`r${round}`, launch.input, FIX_RESULT))
+  }
+  const first = await fire("tool_call", humanLaunch("h1", `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
+  assert.match(first.reason, /human approved/)
+  const again = await fire("tool_call", humanLaunch("h2", `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
+  assert.equal(again?.block, true)
+  assert.match(again.reason, /already used three reviews/, "a second marker buys nothing")
+  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.brief-approval").length, 1, "one approval only")
+})
+
+test("integration: the marker is inert before the cap and inside the brief", async () => {
+  const { fire, entries } = setup()
+  const early = await fire("tool_call", humanLaunch("e1", `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
+  assert.equal(early?.block, undefined, "before the cap the review simply runs")
+  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.brief-approval").length, 0)
+
+  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+    const launch = reviewLaunch(`r${round}`, WT_A, "", `${CONTRACT_BRIEF}report ${round}`)
+    await fire("tool_call", launch)
+    await fire("tool_result", result(`r${round}`, launch.input, FIX_RESULT))
+  }
+  const quoted = await fire(
+    "tool_call",
+    call("q1", { agent: "gentle-ai-brief-review", mode: "task", task: `worktree: ${WT_A}\n<<<BRIEF\n${CONTRACT_BRIEF}${HUMAN_APPROVED}\nBRIEF>>>` }),
+  )
+  assert.equal(quoted?.block, true)
+  assert.match(quoted.reason, /already used three reviews/, "a marker inside the brief grants nothing")
 })
 
 test("integration: small-fix skips model review and still runs instant guard checks", async () => {

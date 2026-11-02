@@ -245,7 +245,10 @@ Writer subagents (`gentle-ai-worker`, `gentle-ai-worker-infra`) only start with 
    `issue: <id>` and `subissue: <id>` when they exist; safety-guard blocks a launch without it.
    That declared scope, canonicalized, is the round identity: a task gets at most three model
    reviews, the fourth launch is blocked, and a review that ends in an error gives its round back
-   once per task: an always-failing reviewer cannot retry for free.
+   once per task: an always-failing reviewer cannot retry for free. A brief whose findings are all
+   fixed can be approved by the human instead of reviewed again: relaunch the reviewer with
+   `<!-- review: human-approved -->` right after the scope line, and that exact brief becomes the
+   writer's approval without a review or a charged round. It is allowed once per task.
    Sibling subissues of one worktree each get their own budget. The brief, the context and the
    previous findings never enter the key, so a corrected brief keeps the same count, and a
    `worktree:` line quoted inside a brief cannot redirect it.
