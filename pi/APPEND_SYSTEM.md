@@ -93,11 +93,20 @@ gentle-pi. Project rules belong in each project's AGENTS.md.
   checks can fail, and whether the plan is the right work. A small-fix brief
   starting with `<!-- review: skipped (small fix) -->` skips the model review
   and still runs these instant checks.
-- The text between the markers must be byte-identical to the later launch's
-  `task` (plus `context`, joined by one blank line). safety-guard hashes
-  both and blocks any launch whose exact brief was not approved. Approvals
-  are single-use: any edit, or a second launch, needs a new review, or the
-  human approval described below when the review budget is spent.
+- The text between the markers must be byte-identical to the writer launch's
+  brief. Launch the writer with that brief wrapped in the same
+  `<<<BRIEF` / `BRIEF>>>` markers: header lines and `context` then never change
+  the key. Only metadata header lines are allowed outside the markers
+  (`mode: task`, `worktree: <absolute path>`, `issue: <id>`, `subissue: <id>`, or
+  the combined `worktree: ... issue: ... subissue: ...`); any other text outside
+  them is not part of the approved brief and blocks the launch. `context` passes
+  only when it repeats text of the approved brief. A writer launched with the
+  bare brief text must also match, so never add `context` there: a bare launch
+  stays hashed whole and carries no `context`. safety-guard hashes exactly that
+  text and blocks
+  any launch whose brief was not approved. Approvals are single-use: any edit,
+  or a second launch, needs a new review, or the human approval described below
+  when the review budget is spent.
 - `VERDICT: FIX`: fix every finding from that review in one pass, with the
   inputs those findings depend on, and relaunch once. Pass the previous
   findings back to the reviewer verbatim, one per line, so it classifies each
