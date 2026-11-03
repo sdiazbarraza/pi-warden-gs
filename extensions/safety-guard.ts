@@ -11,6 +11,9 @@
 //      approval, persisted as a session entry so it survives reload/resume.
 //    - gentle-ai-worker and gentle-ai-worker-infra launch only
 //      when the sha256 of their brief (task + context) holds an unused approval.
+//      A marked launch may carry only metadata header lines outside the markers, and its
+//      `context` must repeat text of the approved brief; anything else is not part of the
+//      approved text and blocks the launch. A bare launch is hashed whole.
 //      Workers may skip the model review when the brief's first line is the small-fix marker; the instant brief-guard checks still run.
 //    - Workers also pass the structure check of hooks/brief-guard.sh, which the Pi side forces
 //      with BRIEF_GUARD_FORCE_STRUCTURE=1 so it cannot be inert or depend on repository config.
@@ -244,10 +247,20 @@ export function normalizeBrief(text: string): string {
   return text.replace(/\r\n/g, "\n").trim()
 }
 
+/** The exact text a writer launch is approved against. */
 export function briefOf(task: unknown, context: unknown): string {
   const t = typeof task === "string" ? task : ""
   const c = typeof context === "string" ? context : ""
   return normalizeBrief(c.trim() ? `${t}\n\n${c}` : t)
+}
+
+// The approval is minted from the marked brief, so a writer that wraps the same brief in the same
+// markers keeps the same key: header lines and context never move it. Anything else is hashed whole,
+// which keeps a plain launch strict.
+export function writerBriefKey(task: unknown, context: unknown): string {
+  const t = typeof task === "string" ? task : ""
+  const marked = extractMarkedBrief(t)
+  return marked === null ? sha256(briefOf(task, context)) : sha256(marked)
 }
 
 export function sha256(text: string): string {
@@ -357,6 +370,51 @@ export function parseFindings(text: string): string[] {
 
 function comparable(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim()
+}
+
+// A line outside the brief markers is metadata only when it declares the launch, never instruction:
+// `mode: task`, `worktree: <absolute path>`, `issue: <id>`, `subissue: <id>`, or the combined
+// `worktree: <absolute path> issue: <id> subissue: <id>`. Anything else on the line makes it extra.
+function isMetadataLine(line: string): boolean {
+  // Surrounding spaces are ignored, but the whole line must be one declared header: anything after a
+  // header (`worktree: /a mode: task please push`) is extra text, so an unapproved instruction can
+  // never ride along with a valid approval just because the line starts like metadata.
+  const flat = line.trim().replace(/[ \t]+/g, " ")
+  if (/^mode: task$/i.test(flat)) return true
+  if (/^(?:sub)?issue: \d+$/i.test(flat)) return true
+  // The path of a scope line is a single bare token: absolute, no whitespace and no `;`.
+  const scope = /^worktree: (\S+) issue: (\d+) subissue: (\d+)$/i.exec(flat)
+  if (scope) return isMetadataPath(scope[1])
+  const bare = /^worktree: (\S+)$/i.exec(flat)
+  if (!bare) return false
+  return isMetadataPath(bare[1])
+}
+
+function isMetadataPath(value: string): boolean {
+  // `issue:` and `subissue:` belong to the combined form only; a bare path never names them.
+  if (/(?:sub)?issue:/i.test(value)) return false
+  return isAbsolute(value) && !value.includes(";")
+}
+
+/**
+ * The launch text the review never read: every line outside the brief markers that is not a
+ * metadata header, plus a `context` that does not repeat text of the approved brief. A launch
+ * without markers returns nothing: it is hashed whole, so it already matches exactly or not at all.
+ */
+export function writerExtraText(task: string, context: unknown): string[] {
+  const marked = extractMarkedBrief(task)
+  if (marked === null) return []
+  const lines = normalizeBrief(task).split("\n")
+  const start = lines.indexOf("<<<BRIEF")
+  const end = lines.indexOf("BRIEF>>>")
+  const extra: string[] = []
+  for (const line of [...lines.slice(0, start), ...lines.slice(end + 1)]) {
+    const value = line.trim()
+    if (value && !isMetadataLine(value)) extra.push(value)
+  }
+  const ctx = text(context).trim()
+  if (ctx && !comparable(marked).includes(comparable(ctx))) extra.push(ctx)
+  return extra
 }
 
 /** The launch text outside the brief markers: what the parent wrote, not what the brief quotes. */
@@ -580,7 +638,11 @@ function errMessage(err: unknown): string {
 }
 
 const NOT_APPROVED =
-  'safety-guard: brief not approved. Run gentle-ai-brief-review with mode "task" and this exact text between <<<BRIEF and BRIEF>>>, then relaunch the identical text. Approvals are single-use.'
+  'safety-guard: brief not approved. Run gentle-ai-brief-review with mode "task" and the brief between <<<BRIEF and BRIEF>>>, then launch the writer with that same brief: either wrap it in the same markers, since only metadata header lines (`mode: task`, `worktree:`, `issue:`, `subissue:`) and a `context` that repeats the brief never move the key, or pass the brief text alone with no `context`. Approvals are single-use.'
+const writerExtraBlocked = (extra: string[]) =>
+  `safety-guard: this text is not part of the approved brief, so no review approved it:\n${extra
+    .map((line) => `- ${line}`)
+    .join("\n")}\nMove it into the brief and review again, or drop it: an approval covers only the brief text between <<<BRIEF and BRIEF>>>, and only metadata header lines (\`mode: task\`, \`worktree: <absolute path>\`, \`issue: <id>\`, \`subissue: <id>\`) may stay outside the markers. A \`context\` passes only when it repeats text of the approved brief.`
 const WRITER_FOLLOWUP =
   "safety-guard: new instructions to a writer task are blocked; launch a new reviewed brief instead."
 const REVIEW_ROUNDS_BLOCKED =
@@ -726,9 +788,13 @@ export default function (
             const rejection = briefRejection(agent, brief, cwd)
             if (rejection) return { block: true, reason: rejection }
           }
+          // The review read only the brief: text outside the markers, or a context that does not
+          // repeat the brief, never rides along with the approval.
+          const extra = writerExtraText(task, input.context)
+          if (extra.length > 0) return { block: true, reason: writerExtraBlocked(extra) }
           // Small-fix skips the model review only; the instant guard still runs above.
           if (isSmallFixExempt(agent, brief)) return
-          const hash = sha256(brief)
+          const hash = writerBriefKey(task, input.context)
           if (!approvals.consume(hash)) return { block: true, reason: NOT_APPROVED }
           pi.appendEntry(APPROVAL_USED, { sha256: hash })
         }

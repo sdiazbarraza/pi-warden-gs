@@ -255,8 +255,13 @@ Writer subagents (`gentle-ai-worker`, `gentle-ai-worker-infra`) only start with 
    Sibling subissues of one worktree each get their own budget. The brief, the context and the
    previous findings never enter the key, so a corrected brief keeps the same count, and a
    `worktree:` line quoted inside a brief cannot redirect it.
-5. Launching a writer consumes that approval for byte-identical text (task plus context). Approvals
-   are single-use: any edit needs a new review.
+5. Launching a writer consumes that approval for byte-identical brief text. Wrapping the brief in the
+   same `<<<BRIEF` / `BRIEF>>>` markers keeps header lines and `context` out of the key; only metadata
+   header lines are allowed outside the markers (`mode: task`, `worktree: <absolute path>`,
+   `issue: <id>`, `subissue: <id>`, or the combined `worktree: ... issue: ... subissue: ...`), so any
+   other text outside them is not part of the approved brief and blocks the launch. `context` passes
+   only when it repeats text of the approved brief. A bare launch is hashed whole, so it must not
+   carry `context`. Approvals are single-use: any edit needs a new review.
 6. Before the approval is consumed, `hooks/brief-guard.sh` checks the structure and the extra
    mechanical rules (size, TDD line, weasel words, preconditions, edit surfaces and hidden-failure
    commands). It validates brief structure only: the delivery and `.env` rules belong to the
