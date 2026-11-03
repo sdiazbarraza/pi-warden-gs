@@ -18,6 +18,8 @@ import guard, {
   extractMarkedBrief,
   hasHumanApproval,
   isSmallFixExempt,
+  missingFindings,
+  parseFindings,
   MAX_REVIEW_ROUNDS,
   ReviewRounds,
   declaredWorktree,
@@ -793,6 +795,7 @@ test("integration: only the first errored review of a task is refunded", async (
 const HUMAN_APPROVED = "<!-- review: human-approved -->"
 const humanLaunch = (id: string, body: string) =>
   call(id, { agent: "gentle-ai-brief-review", mode: "task", task: `worktree: ${WT_A}\n${HUMAN_APPROVED}\n${body}` })
+const writerOf = (brief: string) => ({ agent: "gentle-ai-worker", mode: "task", task: brief })
 
 test("hasHumanApproval reads the line right after the scope declaration", () => {
   assert.equal(hasHumanApproval(`worktree: ${WT_A}\n${HUMAN_APPROVED}\nbody`), true)
@@ -800,49 +803,154 @@ test("hasHumanApproval reads the line right after the scope declaration", () => 
   assert.equal(hasHumanApproval(`${HUMAN_APPROVED}\nworktree: ${WT_A}`), false)
 })
 
-test("integration: a human-approved launch at the cap approves the brief without a review", async () => {
+test("integration: the marker approves at any time without a review or a charged round", async () => {
   const { fire, entries } = setup()
+  const approved = await fire("tool_call", humanLaunch("h1", `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
+  assert.equal(approved?.block, true, "no review runs")
+  assert.match(approved.reason, /human approved/)
+  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.review-round").length, 0, "no round charged")
+  const human = entries.filter((e) => e.customType === "pi-warden-gs.brief-approval")
+  assert.equal(human.length, 1)
+  assert.equal((human[0].data as { source?: string }).source, "human")
+
+  assert.equal((await fire("tool_call", call("w1", writerOf(CONTRACT_BRIEF))))?.block, undefined)
+  assert.equal((await fire("tool_call", call("w2", writerOf(CONTRACT_BRIEF))))?.block, true, "still single use")
+})
+
+test("integration: the marker still works when the review budget is spent", async () => {
+  const { fire } = setup()
   for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
     const launch = reviewLaunch(`r${round}`, WT_A, "", `${CONTRACT_BRIEF}report ${round}`)
     assert.equal((await fire("tool_call", launch))?.block, undefined)
     await fire("tool_result", result(`r${round}`, launch.input, FIX_RESULT))
   }
-  const roundsBefore = entries.filter((e) => e.customType === "pi-warden-gs.review-round").length
-
-  const approved = await fire("tool_call", humanLaunch("h1", `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
-  assert.equal(approved?.block, true, "the reviewer does not run")
+  const brief = `${CONTRACT_BRIEF}corrected`
+  const approved = await fire("tool_call", humanLaunch("h1", `- [IMPORTANTE] x\n<<<BRIEF\n${brief}\nBRIEF>>>`))
   assert.match(approved.reason, /human approved/)
-  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.review-round").length, roundsBefore, "no round is charged")
-  const human = entries.filter((e) => e.customType === "pi-warden-gs.brief-approval")
-  assert.equal(human.length, 1)
-  assert.equal((human[0].data as { source?: string }).source, "human")
-
-  const writer = { agent: "gentle-ai-worker", mode: "task", task: CONTRACT_BRIEF }
-  assert.equal((await fire("tool_call", call("w1", writer)))?.block, undefined, "the approved brief dispatches the writer")
-  assert.equal((await fire("tool_call", call("w2", writer)))?.block, true, "still single use")
+  assert.equal((await fire("tool_call", call("w1", writerOf(brief))))?.block, undefined)
 })
 
-test("integration: the human approval is one per task", async () => {
+test("integration: each exact brief text is human-approved once, and new text can be approved", async () => {
   const { fire, entries } = setup()
-  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
-    const launch = reviewLaunch(`r${round}`, WT_A, "", `${CONTRACT_BRIEF}report ${round}`)
-    await fire("tool_call", launch)
-    await fire("tool_result", result(`r${round}`, launch.input, FIX_RESULT))
-  }
-  const first = await fire("tool_call", humanLaunch("h1", `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
-  assert.match(first.reason, /human approved/)
-  const again = await fire("tool_call", humanLaunch("h2", `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
+  const brief = `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`
+  await fire("tool_call", humanLaunch("h1", brief))
+  assert.equal((await fire("tool_call", call("w1", writerOf(CONTRACT_BRIEF))))?.block, undefined)
+
+  const again = await fire("tool_call", humanLaunch("h2", brief))
   assert.equal(again?.block, true)
-  assert.match(again.reason, /already used three reviews/, "a second marker buys nothing")
-  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.brief-approval").length, 1, "one approval only")
+  assert.match(again.reason, /already approved/, "the same text is never approved twice")
+  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.brief-approval").length, 1)
+
+  const other = await fire("tool_call", humanLaunch("h3", `<<<BRIEF\n${CONTRACT_BRIEF}second\nBRIEF>>>`))
+  assert.match(other.reason, /human approved/, "a different brief is a new decision")
+  assert.equal((await fire("tool_call", call("w2", writerOf(`${CONTRACT_BRIEF}second`))))?.block, undefined)
 })
 
-test("integration: the marker is inert before the cap and inside the brief", async () => {
-  const { fire, entries } = setup()
-  const early = await fire("tool_call", humanLaunch("e1", `<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
-  assert.equal(early?.block, undefined, "before the cap the review simply runs")
-  assert.equal(entries.filter((e) => e.customType === "pi-warden-gs.brief-approval").length, 0)
+test("parseFindings reads the FINDINGS section only", () => {
+  const text = [
+    "VERDICT: FIX",
+    "CLASSIFICATION:",
+    "- OPEN: old finding — src/a.ts:1",
+    "FINDINGS:",
+    "- [BLOQUEANTE] rename the helper — src/a.ts:12",
+    "- [MENOR] tidy the test — tests/a.test.ts:3",
+    "UNVERIFIED:",
+    "- nothing",
+  ].join("\n")
+  assert.deepEqual(parseFindings(text), ["[BLOQUEANTE] rename the helper — src/a.ts:12", "[MENOR] tidy the test — tests/a.test.ts:3"])
+})
 
+test("integration: the marker must list every finding of every review of the task", async () => {
+  const { fire } = setup()
+  const results = [
+    "VERDICT: FIX\nFINDINGS:\n- [BLOQUEANTE] first finding — src/a.ts:1",
+    "VERDICT: FIX\nFINDINGS:\n- [IMPORTANTE] second finding — src/b.ts:2",
+    "VERDICT: FIX\nFINDINGS:\n- [MENOR] third finding — src/c.ts:3",
+  ]
+  for (const [i, verdict] of results.entries()) {
+    const launch = reviewLaunch(`r${i}`, WT_A, "", `${CONTRACT_BRIEF}report ${i}`)
+    await fire("tool_call", launch)
+    await fire("tool_result", result(`r${i}`, launch.input, verdict))
+  }
+
+  const brief = `${CONTRACT_BRIEF}corrected`
+  const partial = await fire("tool_call", humanLaunch("h1", `- [MENOR] third finding\n<<<BRIEF\n${brief}\nBRIEF>>>`))
+  assert.equal(partial?.block, true)
+  assert.match(partial.reason, /first finding/, "an earlier round's finding cannot be dropped")
+  assert.match(partial.reason, /second finding/)
+
+  const all = await fire(
+    "tool_call",
+    humanLaunch(
+      "h2",
+      "- [BLOQUEANTE] first finding — src/a.ts:1\n- [IMPORTANTE] second finding — src/b.ts:2\n- [MENOR] third finding — src/c.ts:3\n<<<BRIEF\n" +
+        `${brief}\nBRIEF>>>`,
+    ),
+  )
+  assert.match(all.reason, /human approved/)
+  assert.equal((await fire("tool_call", call("w1", writerOf(brief))))?.block, undefined)
+})
+
+test("integration: the marker cannot approve the text a review already rejected", async () => {
+  const { fire } = setup()
+  const launch = reviewLaunch("r1", WT_A, "", CONTRACT_BRIEF)
+  await fire("tool_call", launch)
+  await fire("tool_result", result("r1", launch.input, FIX_RESULT))
+
+  const unchanged = await fire("tool_call", humanLaunch("h1", `- [IMPORTANTE] x\n<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
+  assert.equal(unchanged?.block, true)
+  assert.match(unchanged.reason, /already rejected/, "approving without changing anything is refused")
+
+  const changed = await fire("tool_call", humanLaunch("h2", `- [IMPORTANTE] x\n<<<BRIEF\n${CONTRACT_BRIEF}fixed\nBRIEF>>>`))
+  assert.match(changed.reason, /human approved/)
+})
+
+test("parseFindings accepts any severity casing", () => {
+  const text = "VERDICT: FIX\nFINDINGS:\n- [Importante] mixed case — src/a.ts:1"
+  assert.deepEqual(parseFindings(text), ["[Importante] mixed case — src/a.ts:1"])
+})
+
+test("missingFindings ignores text inside the brief markers and demands the whole line", () => {
+  const finding =
+    "[BLOQUEANTE] rename the helper so the intent is explicit at the call site and keep the old name as an alias — src/a.ts:12"
+  const marked = `worktree: /w/a\n<<<BRIEF\n${CONTRACT_BRIEF}${finding}\nBRIEF>>>`
+  assert.deepEqual(missingFindings(marked, [finding]), [finding], "a line inside the brief is not a listing")
+  assert.deepEqual(missingFindings(`worktree: /w/a\n${finding.slice(0, 80)}\n<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`, [finding]), [finding], "a prefix is not the finding")
+  assert.deepEqual(missingFindings(`worktree: /w/a\n${finding}\n<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`, [finding]), [])
+})
+
+test("integration: a finding listed only inside the brief does not count", async () => {
+  const { fire } = setup()
+  const finding = "- [BLOQUEANTE] rename the helper — src/a.ts:12"
+  const launch = reviewLaunch("r1", WT_A, "", CONTRACT_BRIEF)
+  await fire("tool_call", launch)
+  await fire("tool_result", result("r1", launch.input, `VERDICT: FIX\nFINDINGS:\n${finding}`))
+
+  const sneaky = await fire(
+    "tool_call",
+    humanLaunch("h1", `<<<BRIEF\n${CONTRACT_BRIEF}${finding}\nBRIEF>>>`),
+  )
+  assert.equal(sneaky?.block, true)
+  assert.match(sneaky.reason, /are missing/, "the finding was not listed outside the brief")
+})
+
+test("integration: an approved task cannot later approve the text a review rejected", async () => {
+  const { fire } = setup()
+  const first = reviewLaunch("r1", WT_A, "", CONTRACT_BRIEF)
+  await fire("tool_call", first)
+  await fire("tool_result", result("r1", first.input, FIX_RESULT))
+
+  const fixed = `${CONTRACT_BRIEF}fixed`
+  const ok = await fire("tool_call", humanLaunch("h1", `- [IMPORTANTE] x\n<<<BRIEF\n${fixed}\nBRIEF>>>`))
+  assert.match(ok.reason, /human approved/)
+
+  const reused = await fire("tool_call", humanLaunch("h2", `- [IMPORTANTE] x\n<<<BRIEF\n${CONTRACT_BRIEF}\nBRIEF>>>`))
+  assert.equal(reused?.block, true)
+  assert.match(reused.reason, /already rejected/, "the rejected text stays rejected after an approval")
+})
+
+test("integration: a marker inside the brief grants nothing", async () => {
+  const { fire } = setup()
   for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
     const launch = reviewLaunch(`r${round}`, WT_A, "", `${CONTRACT_BRIEF}report ${round}`)
     await fire("tool_call", launch)
@@ -853,7 +961,7 @@ test("integration: the marker is inert before the cap and inside the brief", asy
     call("q1", { agent: "gentle-ai-brief-review", mode: "task", task: `worktree: ${WT_A}\n<<<BRIEF\n${CONTRACT_BRIEF}${HUMAN_APPROVED}\nBRIEF>>>` }),
   )
   assert.equal(quoted?.block, true)
-  assert.match(quoted.reason, /already used three reviews/, "a marker inside the brief grants nothing")
+  assert.match(quoted.reason, /already used three reviews/)
 })
 
 test("integration: small-fix skips model review and still runs instant guard checks", async () => {

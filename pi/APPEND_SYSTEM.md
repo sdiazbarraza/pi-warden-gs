@@ -106,14 +106,20 @@ gentle-pi. Project rules belong in each project's AGENTS.md.
   `issue: <id>` and `subissue: <id>`. That declared scope is the round identity,
   and safety-guard blocks a launch without it. A task gets at most
   three reviews; safety-guard blocks the fourth launch of the same task, and a
-  review that ends in an error gives its round back once per task. When the cap
-  blocks the launch and you have already fixed every open finding in one pass,
-  ask the human. If the human approves that exact brief, relaunch the reviewer
-  with the line `<!-- review: human-approved -->` immediately after the scope
-  line: no review runs, no round is charged, and that exact brief becomes the
-  writer's approval. One human approval per task, never more. Use it only with
-  the human's explicit approval and only on a brief whose findings you already
-  fixed.
+  review that ends in an error gives its round back once per task. When the third
+  review still returns `FIX`, or the cap blocks the launch, show the human the
+  accumulated findings of every review of that task before asking anything: they
+  are the decision. The human can also settle a brief without any review: with
+  their explicit approval, relaunch
+  the reviewer with the line `<!-- review: human-approved -->` immediately after
+  the scope line. No review runs, no round is charged, and that exact brief
+  becomes the writer's approval, at any point of the budget. The launch must
+  list, verbatim and outside the brief markers, every finding the reviews of that
+  task raised: safety-guard refuses an approval that drops one, that shortens it,
+  that quotes it inside the brief, or that approves the exact text a review
+  already rejected. Each brief text is approved this way
+  once, so a corrected brief needs its own decision. Never add the line without
+  the human's explicit approval.
   The brief, the context and the previous findings never set the identity, so a
   corrected brief keeps its count. Stop and show the human the findings when a
   `FIX` repeats a finding from an earlier review of the same brief, when the

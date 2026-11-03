@@ -49,6 +49,7 @@ const REVIEW_ROUND = "pi-warden-gs.review-round"
 const REVIEW_ROUND_REFUND = "pi-warden-gs.review-round-refund"
 const HUMAN_APPROVAL = "<!-- review: human-approved -->"
 const HUMAN_APPROVAL_ENTRY = "pi-warden-gs.human-approval"
+const REVIEW_FINDINGS = "pi-warden-gs.review-findings"
 export const MAX_REVIEW_ROUNDS = 3
 export const MAX_REVIEW_REFUNDS = 1
 
@@ -317,9 +318,9 @@ export function declaredReviewScope(task: string): ReviewScope | null {
 }
 
 /**
- * The human decision that ends an exhausted review loop: the exact line
- * `<!-- review: human-approved -->` immediately after the scope declaration. It never buys another
- * review round; at the cap it approves that exact brief, so the writer can start without one.
+ * The human decision on one brief: the exact line `<!-- review: human-approved -->` immediately after
+ * the scope declaration. It never buys a review round; it approves that exact brief, so the writer can
+ * start without a review, at any point of the review budget and as often as the human decides.
  */
 export function hasHumanApproval(task: string): boolean {
   const lines = task.replace(/\r\n/g, "\n").split("\n")
@@ -338,20 +339,97 @@ export function roundIdentity(task: string): string | null {
   return sha256([scope.worktree, scope.issue ?? "", scope.subissue ?? ""].join("\n"))
 }
 
-// One human approval per task: the exhausted loop ends once, not once per relaunch.
+// Each exact brief text is human-approved once: repeating the marker approves nothing new, while a
+// corrected brief is a new text and therefore a new decision.
+/** The `- [SEVERITY] ...` lines of a reviewer verdict's FINDINGS section. */
+export function parseFindings(text: string): string[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n")
+  const start = lines.findIndex((l) => /^\s*FINDINGS:\s*$/.test(l))
+  const body = start >= 0 ? lines.slice(start + 1) : lines
+  const findings: string[] = []
+  for (const line of body) {
+    if (start >= 0 && /^\s*(CLASSIFICATION|UNVERIFIED|VERDICT):\s*$/.test(line)) break
+    const m = /^\s*-\s*(\[[A-Za-z][A-Za-z ]*\].*)$/.exec(line)
+    if (m) findings.push(m[1].trim())
+  }
+  return findings
+}
+
+function comparable(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim()
+}
+
+/** The launch text outside the brief markers: what the parent wrote, not what the brief quotes. */
+function outsideMarkedBrief(task: string): string {
+  const lines = task.replace(/\r\n/g, "\n").split("\n")
+  const start = lines.indexOf("<<<BRIEF")
+  const end = lines.indexOf("BRIEF>>>")
+  if (start < 0 || end <= start) return task
+  return [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n")
+}
+
+/** The findings of a verdict that the launch does not list verbatim outside the brief markers. */
+export function missingFindings(text: string, findings: string[]): string[] {
+  const haystack = comparable(outsideMarkedBrief(text))
+  return findings.filter((f) => !haystack.includes(comparable(f)))
+}
+
+// What each review of a task rejected: the accumulated findings and the exact texts it already
+// turned down, so approving a brief cannot silently drop an earlier round's finding.
+export class PendingFindings {
+  private byLineage = new Map<string, { findings: string[]; hashes: string[] }>()
+  private state(lineage: string) {
+    const current = this.byLineage.get(lineage)
+    if (current) return current
+    const fresh = { findings: [] as string[], hashes: [] as string[] }
+    this.byLineage.set(lineage, fresh)
+    return fresh
+  }
+  add(lineage: string, hash: string, findings: string[]): void {
+    const state = this.state(lineage)
+    for (const finding of findings) if (!state.findings.includes(finding)) state.findings.push(finding)
+    if (!state.hashes.includes(hash)) state.hashes.push(hash)
+  }
+  // An approval settles the findings of this task. The texts a review already rejected stay on
+  // record: an approval never makes rejected text approvable.
+  clear(lineage: string): void {
+    const state = this.byLineage.get(lineage)
+    if (state) state.findings = []
+  }
+  of(lineage: string): { findings: string[]; hashes: string[] } {
+    return this.byLineage.get(lineage) ?? { findings: [], hashes: [] }
+  }
+  static fromEntries(entries: Entry[]): PendingFindings {
+    const pending = new PendingFindings()
+    for (const e of entries) {
+      if (e.customType !== REVIEW_FINDINGS) continue
+      const lineage = dataField(e, "lineage")
+      const hash = dataField(e, "sha256")
+      if (!lineage || !hash) continue
+      if (dataField(e, "cleared") === "1") {
+        pending.clear(lineage)
+        continue
+      }
+      const findings = (e.data as { findings?: unknown })?.findings
+      pending.add(lineage, hash, Array.isArray(findings) ? findings.filter((f): f is string => typeof f === "string") : [])
+    }
+    return pending
+  }
+}
+
 export class HumanApprovals {
   private used = new Set<string>()
-  use(lineage: string): boolean {
-    if (this.used.has(lineage)) return false
-    this.used.add(lineage)
+  use(sha256OfBrief: string): boolean {
+    if (this.used.has(sha256OfBrief)) return false
+    this.used.add(sha256OfBrief)
     return true
   }
   static fromEntries(entries: Entry[]): HumanApprovals {
     const approvals = new HumanApprovals()
     for (const e of entries) {
       if (e.customType !== HUMAN_APPROVAL_ENTRY) continue
-      const lineage = dataField(e, "lineage")
-      if (lineage) approvals.use(lineage)
+      const hash = dataField(e, "sha256")
+      if (hash) approvals.use(hash)
     }
     return approvals
   }
@@ -508,7 +586,16 @@ const WRITER_FOLLOWUP =
 const REVIEW_ROUNDS_BLOCKED =
   "safety-guard: this task already used three reviews of a worker brief. Fix every finding from the last review in one pass before relaunching; three reviews per declared task (worktree, issue and subissue) are the limit, and one errored review per task gives its round back."
 const HUMAN_APPROVED_DISPATCH =
-  "safety-guard: this task already used its three reviews and the human approved this exact brief. No review ran and no round was charged; launch the writer now with the identical brief text."
+  "safety-guard: the human approved this exact brief. No review ran and no round was charged; launch the writer now with the identical brief text."
+const HUMAN_APPROVAL_UNCHANGED =
+  "safety-guard: this brief is the exact text a review already rejected. Fix the findings before asking for a human approval."
+const pendingFindingsBlocked = (findings: string[]) =>
+  `safety-guard: a human approval must list every finding the reviews of this task raised, and ${findings.length} are missing. Paste each one, verbatim, outside the brief markers:\n${findings
+    .slice(0, 10)
+    .map((f) => `- ${f}`)
+    .join("\n")}`
+const HUMAN_APPROVED_REPEAT =
+  "safety-guard: this exact brief text was already approved by the human, and that approval is single-use. A corrected brief is a new text and needs its own decision."
 const WORKTREE_REQUIRED =
   "safety-guard: start the reviewer task with `worktree: <absolute path>` on its first line, optionally followed by `issue: <id>` and `subissue: <id>` (for example `worktree: /repo-feat issue: 42 subissue: 12`). That line is the round identity of the three-review cap, so it must not come from the brief, a finding or the context."
 
@@ -521,6 +608,7 @@ export default function (
   let writerTasks = new WriterTasks()
   let rounds = new ReviewRounds()
   let humanApprovals = new HumanApprovals()
+  let pendingFindings = new PendingFindings()
   const pendingReviews = new Map<string, { hash: string; lineage: string }>()
 
   const rebuild = (ctx: unknown) => {
@@ -530,6 +618,7 @@ export default function (
       writerTasks = WriterTasks.fromEntries(entries)
       rounds = ReviewRounds.fromEntries(entries)
       humanApprovals = HumanApprovals.fromEntries(entries)
+      pendingFindings = PendingFindings.fromEntries(entries)
     } catch (err) {
       console.warn("[safety-guard] could not rebuild state from the session", err)
     }
@@ -605,18 +694,24 @@ export default function (
           const lineage = roundIdentity(task)
           if (!scope || !lineage) return { block: true, reason: WORKTREE_REQUIRED }
           rounds.adopt(sha256(scope.worktree), lineage)
-          if (rounds.atCap(lineage)) {
-            // The loop is exhausted. A human decision ends it by approving this exact brief
-            // instead of paying for a fourth review: no round is charged and no review runs.
-            if (hasHumanApproval(task) && humanApprovals.use(lineage)) {
-              const hash = sha256(marked)
-              approvals.add(hash)
-              pi.appendEntry(HUMAN_APPROVAL_ENTRY, { lineage, at: new Date().toISOString() })
-              pi.appendEntry(APPROVAL, { sha256: hash, at: new Date().toISOString(), source: "human" })
-              return { block: true, reason: HUMAN_APPROVED_DISPATCH }
-            }
-            return { block: true, reason: REVIEW_ROUNDS_BLOCKED }
+          // A human decision settles this exact brief without a review: no round is charged, and it
+          // applies at any point of the review budget, as often as the human decides, on new text.
+          if (hasHumanApproval(task)) {
+            const hash = sha256(marked)
+            if (approvals.has(hash)) return { block: true, reason: HUMAN_APPROVED_DISPATCH }
+            const pending = pendingFindings.of(lineage)
+            const missing = missingFindings(task, pending.findings)
+            if (missing.length > 0) return { block: true, reason: pendingFindingsBlocked(missing) }
+            if (pending.hashes.includes(hash)) return { block: true, reason: HUMAN_APPROVAL_UNCHANGED }
+            if (!humanApprovals.use(hash)) return { block: true, reason: HUMAN_APPROVED_REPEAT }
+            approvals.add(hash)
+            pendingFindings.clear(lineage)
+            pi.appendEntry(REVIEW_FINDINGS, { lineage, sha256: hash, cleared: "1", at: new Date().toISOString() })
+            pi.appendEntry(HUMAN_APPROVAL_ENTRY, { sha256: hash, at: new Date().toISOString() })
+            pi.appendEntry(APPROVAL, { sha256: hash, at: new Date().toISOString(), source: "human" })
+            return { block: true, reason: HUMAN_APPROVED_DISPATCH }
           }
+          if (rounds.atCap(lineage)) return { block: true, reason: REVIEW_ROUNDS_BLOCKED }
           rounds.start(lineage)
           pi.appendEntry(REVIEW_ROUND, { lineage, at: new Date().toISOString() })
           pendingReviews.set(event.toolCallId, { hash: sha256(marked), lineage })
@@ -677,7 +772,13 @@ export default function (
         const body = (event.content ?? [])
           .map((c) => (c.type === "text" ? c.text : ""))
           .join("\n")
-        if (parseVerdict(body) === "APPROVE") {
+        const verdict = parseVerdict(body)
+        if (verdict === "FIX") {
+          const findings = parseFindings(body)
+          pendingFindings.add(pending.lineage, pending.hash, findings)
+          pi.appendEntry(REVIEW_FINDINGS, { lineage: pending.lineage, sha256: pending.hash, findings, at: new Date().toISOString() })
+        }
+        if (verdict === "APPROVE") {
           approvals.add(pending.hash)
           pi.appendEntry(APPROVAL, { sha256: pending.hash, at: new Date().toISOString() })
         }
