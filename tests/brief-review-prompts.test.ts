@@ -28,3 +28,8 @@ test("override fixes every finding in one pass and caps review rounds", () => {
   assert.match(OVERRIDE, /worktree: <absolute path>/)
   assert.match(OVERRIDE, /round identity/)
 })
+
+test("the override shows the accumulated findings before asking the human", () => {
+  assert.match(OVERRIDE, /show the human the\s+accumulated findings/i)
+  assert.match(OVERRIDE, /every review of that task/i)
+})
