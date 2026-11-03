@@ -213,6 +213,17 @@ gentle-pi. Project rules belong in each project's AGENTS.md.
   observation once), read the task file by section or grep, and fetch a full
   Engram observation only when a decision depends on it.
 
+### codemode
+
+- Use `codemode` when a turn needs 3 or more independent tool calls, or when
+  the raw output of one call would exceed about 1.000 tokens and only a few
+  fields are needed.
+- Never use it for a single call, for small outputs, for file edits (`edit`),
+  or for shell work (`bash`): the script is output tokens and only pays off
+  through batching or filtering.
+- Batch with `await Promise.allSettled([...])` and return only the needed
+  fields, so large payloads never enter the conversation.
+
 ### Model and effort
 
 - Never change a subagent's model or reasoning effort without the user's
