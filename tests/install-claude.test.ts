@@ -169,3 +169,35 @@ test("installing 3.0.0 removes the retired brief-review assets and reports each 
   assert.ok(commands.includes("my-stop-hook"), "a foreign event was dropped")
   assert.doesNotMatch(commands.join("\n"), /brief-guard|brief-approval/)
 })
+
+test("a fresh install reports the Claude settings file once", () => {
+  const { out } = setup()
+  assert.equal(out.status, 0, out.stderr)
+  const reported = out.stdout
+    .split("\n")
+    .filter((line) => /^(unchanged|updated|copied) /.test(line) && line.includes("settings.json"))
+  assert.equal(reported.length, 1, `settings.json reported ${reported.length} times`)
+})
+
+test("the migration drops an emptied event and keeps one backup of the original", () => {
+  const original = JSON.stringify({
+    hooks: {
+      PreToolUse: [{ matcher: "Agent", hooks: [{ type: "command", command: "~/.claude/hooks/brief-guard.sh", timeout: 10 }] }],
+      PostToolUse: [{ matcher: "Agent", hooks: [{ type: "command", command: "node ~/.claude/hooks/brief-approval.mjs", timeout: 5 }] }],
+    },
+  })
+  const { claude, out } = setup((claude) => {
+    mkdirSync(join(claude, "hooks", "lib"), { recursive: true })
+    writeFileSync(join(claude, "settings.json"), original)
+  })
+  assert.equal(out.status, 0, out.stderr)
+
+  const settings = JSON.parse(readFileSync(join(claude, "settings.json"), "utf8"))
+  assert.equal(settings.hooks.PostToolUse, undefined, "an event left empty by the migration must be dropped")
+
+  // The settings file is updated twice in this run: the registration and the migration. The first
+  // backup must still hold the user's original, and the second must not overwrite it.
+  const backups = readdirSync(claude).filter((name) => name.startsWith("settings.json.bak-")).sort()
+  assert.ok(backups.length >= 1, "the migration must keep a backup")
+  assert.equal(readFileSync(join(claude, backups[0]), "utf8"), original, "the first backup must hold the original file")
+})

@@ -191,7 +191,7 @@ done
 
 # Rewrites a JSON settings file with a jq filter, only when the result differs.
 update_json() {
-  local file="$1" filter="$2" tmp
+  local file="$1" filter="$2" tmp backup
   mkdir -p "$(dirname "$file")"
   [ -e "$file" ] || echo '{}' > "$file"
   tmp="$(mktemp "$file.XXXXXX")"
@@ -200,9 +200,16 @@ update_json() {
     rm -f "$tmp"
     echo "unchanged $file"
   else
-    cp -p "$file" "$file.bak-$STAMP"
+    # A file updated twice in one run must not lose the user's original to the second backup.
+    backup="$file.bak-$STAMP"
+    n=1
+    while [ -e "$backup" ]; do
+      n=$((n + 1))
+      backup="$file.bak-$STAMP-$n"
+    done
+    cp -p "$file" "$backup"
     mv "$tmp" "$file"
-    echo "updated $file (backup: $file.bak-$STAMP)"
+    echo "updated $file (backup: $backup)"
   fi
 }
 
@@ -229,14 +236,16 @@ if [ -f "$PKG_DIR/claude/claude-settings.jq" ]; then
 fi
 
 # A registration that survived the removal points at a deleted script and would deny every Agent
-# call, so it is dropped here. Every other hook and matcher is left byte-identical.
-if [ -f "$CLAUDE_HOME/settings.json" ]; then
+# call, so it is dropped here. Every other hook and matcher is left byte-identical, and a settings
+# file with no retired entry is not touched at all.
+if [ -f "$CLAUDE_HOME/settings.json" ] && grep -q 'brief-guard\.sh\|brief-approval\.mjs' "$CLAUDE_HOME/settings.json"; then
   update_json "$CLAUDE_HOME/settings.json" '
     if .hooks then
       .hooks |= with_entries(
         .value |= map(.hooks |= map(select(((.command // "") | test("brief-guard\\.sh|brief-approval\\.mjs")) | not)))
         | .value |= map(select((.hooks | length) > 0))
       )
+      | .hooks |= with_entries(select((.value | length) > 0))
     else . end'
 fi
 
