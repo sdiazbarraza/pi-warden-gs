@@ -4,69 +4,20 @@
 //    compose down -v, git reset --hard, force push, git clean -f, sudo).
 //    Matches anywhere in the command line, so chains and `git -C <path>` forms
 //    are caught. This check stays fail-open: an internal error passes the call.
-// 2. subagent_run, brief approval gate (fail-closed):
-//    - gentle-ai-brief-review must run with mode "task" and receive the brief
-//      inline between a line `<<<BRIEF` and a line `BRIEF>>>`. On a result with
-//      `VERDICT: APPROVE`, the sha256 of that exact brief becomes a single-use
-//      approval, persisted as a session entry so it survives reload/resume.
-//    - gentle-ai-worker and gentle-ai-worker-infra launch only
-//      when the sha256 of their brief (task + context) holds an unused approval.
-//      A marked launch may carry only metadata header lines outside the markers, and its
-//      `context` must repeat text of the approved brief; anything else is not part of the
-//      approved text and blocks the launch. A bare launch is hashed whole.
-//      Workers may skip the model review when the brief's first line is the small-fix marker; the instant brief-guard checks still run.
-//    - Workers also pass the structure check of hooks/brief-guard.sh, which the Pi side forces
-//      with BRIEF_GUARD_FORCE_STRUCTURE=1 so it cannot be inert or depend on repository config.
-//    - Any internal error, or a brief-guard that cannot run, BLOCKS the dispatch.
-// 3. subagent_continue / subagent_send_message to a writer task are
-//    always blocked: new instructions need a new reviewed brief.
-// 4. bash / bash_background / monitor: delivery commands (git push,
+// 2. bash / bash_background / monitor: delivery commands (git push,
 //    gh pr create|merge|edit) run only inside gentle-ai-publisher, recognized as
 //    a gentle-pi child (GENTLE_PI_AGENTS_CHILD=1) whose appended system prompt
 //    carries PUBLISHER_MARKER. Everywhere else they are blocked (fail-closed).
-// 5. bash / bash_background / monitor: a command that names an environment file
+// 3. bash / bash_background / monitor: a command that names an environment file
 //    (".env" or ".env.*", except the exact ".env.example") is blocked everywhere,
 //    publisher included: environment files hold secrets.
-// 6. bash / bash_background / monitor: builds, test runs and container runs
+// 4. bash / bash_background / monitor: builds, test runs and container runs
 //    (dotnet-in-docker.sh, docker run|build|exec, docker compose up|run|build|exec)
 //    run only in a gentle-pi child (GENTLE_PI_AGENTS_CHILD=1); the orchestrator must
 //    delegate them. Read-only docker queries stay allowed (fail-closed).
 
-import { createHash } from "node:crypto"
-import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync, realpathSync } from "node:fs"
-import { homedir } from "node:os"
-import { dirname, isAbsolute, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { existsSync, readFileSync } from "node:fs"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
-
-const BRIEF_GUARD_TIMEOUT_MS = 5_000
-const WRITER_AGENTS = new Set(["gentle-ai-worker", "gentle-ai-worker-infra"])
-const GATED_AGENTS = new Set(["gentle-ai-worker", "gentle-ai-worker-infra"])
-const REVIEWER = "gentle-ai-brief-review"
-const SKIP_MARKER = "<!-- review: skipped (small fix) -->"
-const APPROVAL = "pi-warden-gs.brief-approval"
-const APPROVAL_USED = "pi-warden-gs.brief-approval-used"
-const WRITER_TASK = "pi-warden-gs.writer-task"
-const REVIEW_ROUND = "pi-warden-gs.review-round"
-const REVIEW_ROUND_REFUND = "pi-warden-gs.review-round-refund"
-const HUMAN_APPROVAL = "<!-- review: human-approved -->"
-const HUMAN_APPROVAL_ENTRY = "pi-warden-gs.human-approval"
-const REVIEW_FINDINGS = "pi-warden-gs.review-findings"
-export const MAX_REVIEW_ROUNDS = 3
-export const MAX_REVIEW_REFUNDS = 1
-
-function resolveBriefGuard(): string {
-  const override = process.env.PI_WARDEN_GS_BRIEF_GUARD
-  if (override) return override
-  const fallback = join(homedir(), ".claude", "hooks", "brief-guard.sh")
-  try {
-    const local = join(dirname(fileURLToPath(import.meta.url)), "..", "hooks", "brief-guard.sh")
-    return existsSync(local) ? local : fallback
-  } catch {
-    return fallback
-  }
-}
 
 // [pattern, label] — a match blocks the command.
 const DESTRUCTIVE: Array<[RegExp, string]> = [
@@ -243,392 +194,6 @@ const DELIVERY_BLOCKED = (label: string) =>
 const ENV_BLOCKED = (label: string) =>
   `safety-guard: "${label}" is blocked. Environment files hold secrets and must not be read by an agent. If the human explicitly authorized it, ask them to run it themselves.`
 
-export function normalizeBrief(text: string): string {
-  return text.replace(/\r\n/g, "\n").trim()
-}
-
-/** The exact text a writer launch is approved against. */
-export function briefOf(task: unknown, context: unknown): string {
-  const t = typeof task === "string" ? task : ""
-  const c = typeof context === "string" ? context : ""
-  return normalizeBrief(c.trim() ? `${t}\n\n${c}` : t)
-}
-
-// The approval is minted from the marked brief, so a writer that wraps the same brief in the same
-// markers keeps the same key: header lines and context never move it. Anything else is hashed whole,
-// which keeps a plain launch strict.
-export function writerBriefKey(task: unknown, context: unknown): string {
-  const t = typeof task === "string" ? task : ""
-  const marked = extractMarkedBrief(t)
-  return marked === null ? sha256(briefOf(task, context)) : sha256(marked)
-}
-
-export function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex")
-}
-
-// The normalized text between a line `<<<BRIEF` and a line `BRIEF>>>`; null unless exactly one pair.
-export function extractMarkedBrief(task: string): string | null {
-  const lines = task.replace(/\r\n/g, "\n").split("\n")
-  const starts = lines.flatMap((l, i) => (l === "<<<BRIEF" ? [i] : []))
-  const ends = lines.flatMap((l, i) => (l === "BRIEF>>>" ? [i] : []))
-  if (starts.length !== 1 || ends.length !== 1 || ends[0] <= starts[0]) return null
-  return normalizeBrief(lines.slice(starts[0] + 1, ends[0]).join("\n"))
-}
-
-export function parseVerdict(text: string): "APPROVE" | "FIX" | null {
-  const m = /^VERDICT:\s*(APPROVE|FIX)\b/m.exec(text)
-  return m ? (m[1] as "APPROVE" | "FIX") : null
-}
-
-// Background launches report only "Started <agent> in the background as task <id>. ..." in text.
-export function taskIdFromText(text: string): string | null {
-  const m = /\bas task (\S+?)\.(?:\s|$)/.exec(text)
-  return m ? m[1] : null
-}
-
-export function isSmallFixExempt(agent: string, brief: string): boolean {
-  if (!WRITER_AGENTS.has(agent)) return false
-  return normalizeBrief(brief).split("\n")[0] === SKIP_MARKER
-}
-
-/** Writer named outside <<<BRIEF / BRIEF>>> in a reviewer task; default gentle-ai-worker. */
-export function writerAgentOfReviewTask(task: string): string {
-  const lines = task.replace(/\r\n/g, "\n").split("\n")
-  const start = lines.indexOf("<<<BRIEF")
-  const end = lines.indexOf("BRIEF>>>")
-  const outer =
-    start >= 0 && end > start ? [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n") : task
-  if (/\bgentle-ai-worker-infra\b/.test(outer)) return "gentle-ai-worker-infra"
-  if (/\bgentle-ai-worker\b/.test(outer)) return "gentle-ai-worker"
-  return "gentle-ai-worker"
-}
-
-// Round identity of a review: the scope the launch declares on its FIRST line, canonicalized:
-// `worktree: <absolute path> [issue: <id>] [subissue: <id>]`. The task unit of the harness is the
-// subissue, so sibling subissues of one worktree each get their own budget. Nothing else enters the
-// key: the brief and the previous findings change on every round, the writer is never read from free
-// text (a finding can name another agent), and only the first line declares, so neither the brief nor
-// a finding can redirect or split the count.
-export type ReviewScope = { worktree: string; issue: string | null; subissue: string | null }
-
-function canonicalPath(value: string): string {
-  try {
-    return realpathSync(value)
-  } catch {
-    return resolve(value)
-  }
-}
-
-/** The scope a reviewer launch declares on its first line, or null when it declares none. */
-export function declaredReviewScope(task: string): ReviewScope | null {
-  const first = (task.replace(/\r\n/g, "\n").split("\n")[0] ?? "").trimEnd()
-  const m = /^worktree:[ \t]*(.+?)(?:[ \t]+issue:[ \t]*(\S+))?(?:[ \t]+subissue:[ \t]*(\S+))?$/.exec(first)
-  if (!m) return null
-  const value = m[1].trim().replace(/^[`"']+|[`"']+$/g, "")
-  if (!value || !isAbsolute(value) || !existsSync(value)) return null
-  return { worktree: canonicalPath(value), issue: m[2] ?? null, subissue: m[3] ?? null }
-}
-
-/**
- * The human decision on one brief: the exact line `<!-- review: human-approved -->` immediately after
- * the scope declaration. It never buys a review round; it approves that exact brief, so the writer can
- * start without a review, at any point of the review budget and as often as the human decides.
- */
-export function hasHumanApproval(task: string): boolean {
-  const lines = task.replace(/\r\n/g, "\n").split("\n")
-  return (lines[1] ?? "").trim() === HUMAN_APPROVAL
-}
-
-/** The canonical worktree of a reviewer launch, or null when the launch does not declare one. */
-export function declaredWorktree(task: string): string | null {
-  return declaredReviewScope(task)?.worktree ?? null
-}
-
-/** The round identity: worktree plus the issue and subissue the launch declares, when it does. */
-export function roundIdentity(task: string): string | null {
-  const scope = declaredReviewScope(task)
-  if (!scope) return null
-  return sha256([scope.worktree, scope.issue ?? "", scope.subissue ?? ""].join("\n"))
-}
-
-// Each exact brief text is human-approved once: repeating the marker approves nothing new, while a
-// corrected brief is a new text and therefore a new decision.
-/** The `- [SEVERITY] ...` lines of a reviewer verdict's FINDINGS section. */
-export function parseFindings(text: string): string[] {
-  const lines = text.replace(/\r\n/g, "\n").split("\n")
-  const start = lines.findIndex((l) => /^\s*FINDINGS:\s*$/.test(l))
-  const body = start >= 0 ? lines.slice(start + 1) : lines
-  const findings: string[] = []
-  for (const line of body) {
-    if (start >= 0 && /^\s*(CLASSIFICATION|UNVERIFIED|VERDICT):\s*$/.test(line)) break
-    const m = /^\s*-\s*(\[[A-Za-z][A-Za-z ]*\].*)$/.exec(line)
-    if (m) findings.push(m[1].trim())
-  }
-  return findings
-}
-
-function comparable(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim()
-}
-
-// A line outside the brief markers is metadata only when it declares the launch, never instruction:
-// `mode: task`, `worktree: <absolute path>`, `issue: <id>`, `subissue: <id>`, or the combined
-// `worktree: <absolute path> issue: <id> subissue: <id>`. Anything else on the line makes it extra.
-function isMetadataLine(line: string): boolean {
-  // Surrounding spaces are ignored, but the whole line must be one declared header: anything after a
-  // header (`worktree: /a mode: task please push`) is extra text, so an unapproved instruction can
-  // never ride along with a valid approval just because the line starts like metadata.
-  const flat = line.trim().replace(/[ \t]+/g, " ")
-  if (/^mode: task$/i.test(flat)) return true
-  if (/^(?:sub)?issue: \d+$/i.test(flat)) return true
-  // The path of a scope line is a single bare token: absolute, no whitespace and no `;`.
-  const scope = /^worktree: (\S+) issue: (\d+) subissue: (\d+)$/i.exec(flat)
-  if (scope) return isMetadataPath(scope[1])
-  const bare = /^worktree: (\S+)$/i.exec(flat)
-  if (!bare) return false
-  return isMetadataPath(bare[1])
-}
-
-function isMetadataPath(value: string): boolean {
-  // `issue:` and `subissue:` belong to the combined form only; a bare path never names them.
-  if (/(?:sub)?issue:/i.test(value)) return false
-  return isAbsolute(value) && !value.includes(";")
-}
-
-/**
- * The launch text the review never read: every line outside the brief markers that is not a
- * metadata header, plus a `context` that does not repeat text of the approved brief. A launch
- * without markers returns nothing: it is hashed whole, so it already matches exactly or not at all.
- */
-export function writerExtraText(task: string, context: unknown): string[] {
-  const marked = extractMarkedBrief(task)
-  if (marked === null) return []
-  const lines = normalizeBrief(task).split("\n")
-  const start = lines.indexOf("<<<BRIEF")
-  const end = lines.indexOf("BRIEF>>>")
-  const extra: string[] = []
-  for (const line of [...lines.slice(0, start), ...lines.slice(end + 1)]) {
-    const value = line.trim()
-    if (value && !isMetadataLine(value)) extra.push(value)
-  }
-  const ctx = text(context).trim()
-  if (ctx && !comparable(marked).includes(comparable(ctx))) extra.push(ctx)
-  return extra
-}
-
-/** The launch text outside the brief markers: what the parent wrote, not what the brief quotes. */
-function outsideMarkedBrief(task: string): string {
-  const lines = task.replace(/\r\n/g, "\n").split("\n")
-  const start = lines.indexOf("<<<BRIEF")
-  const end = lines.indexOf("BRIEF>>>")
-  if (start < 0 || end <= start) return task
-  return [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n")
-}
-
-/** The findings of a verdict that the launch does not list verbatim outside the brief markers. */
-export function missingFindings(text: string, findings: string[]): string[] {
-  const haystack = comparable(outsideMarkedBrief(text))
-  return findings.filter((f) => !haystack.includes(comparable(f)))
-}
-
-// What each review of a task rejected: the accumulated findings and the exact texts it already
-// turned down, so approving a brief cannot silently drop an earlier round's finding.
-export class PendingFindings {
-  private byLineage = new Map<string, { findings: string[]; hashes: string[] }>()
-  private state(lineage: string) {
-    const current = this.byLineage.get(lineage)
-    if (current) return current
-    const fresh = { findings: [] as string[], hashes: [] as string[] }
-    this.byLineage.set(lineage, fresh)
-    return fresh
-  }
-  add(lineage: string, hash: string, findings: string[]): void {
-    const state = this.state(lineage)
-    for (const finding of findings) if (!state.findings.includes(finding)) state.findings.push(finding)
-    if (!state.hashes.includes(hash)) state.hashes.push(hash)
-  }
-  // An approval settles the findings of this task. The texts a review already rejected stay on
-  // record: an approval never makes rejected text approvable.
-  clear(lineage: string): void {
-    const state = this.byLineage.get(lineage)
-    if (state) state.findings = []
-  }
-  of(lineage: string): { findings: string[]; hashes: string[] } {
-    return this.byLineage.get(lineage) ?? { findings: [], hashes: [] }
-  }
-  static fromEntries(entries: Entry[]): PendingFindings {
-    const pending = new PendingFindings()
-    for (const e of entries) {
-      if (e.customType !== REVIEW_FINDINGS) continue
-      const lineage = dataField(e, "lineage")
-      const hash = dataField(e, "sha256")
-      if (!lineage || !hash) continue
-      if (dataField(e, "cleared") === "1") {
-        pending.clear(lineage)
-        continue
-      }
-      const findings = (e.data as { findings?: unknown })?.findings
-      pending.add(lineage, hash, Array.isArray(findings) ? findings.filter((f): f is string => typeof f === "string") : [])
-    }
-    return pending
-  }
-}
-
-export class HumanApprovals {
-  private used = new Set<string>()
-  use(sha256OfBrief: string): boolean {
-    if (this.used.has(sha256OfBrief)) return false
-    this.used.add(sha256OfBrief)
-    return true
-  }
-  static fromEntries(entries: Entry[]): HumanApprovals {
-    const approvals = new HumanApprovals()
-    for (const e of entries) {
-      if (e.customType !== HUMAN_APPROVAL_ENTRY) continue
-      const hash = dataField(e, "sha256")
-      if (hash) approvals.use(hash)
-    }
-    return approvals
-  }
-}
-
-export class ReviewRounds {
-  private counts = new Map<string, number>()
-  private refunds = new Map<string, number>()
-  start(lineage: string): void {
-    this.counts.set(lineage, (this.counts.get(lineage) ?? 0) + 1)
-  }
-  count(lineage: string): number {
-    return this.counts.get(lineage) ?? 0
-  }
-  // A review that errored produced no findings, so its round is given back, at most
-  // MAX_REVIEW_REFUNDS times per task: an always-failing reviewer cannot retry for free.
-  refund(lineage: string): boolean {
-    if (this.count(lineage) <= 0) return false
-    if ((this.refunds.get(lineage) ?? 0) >= MAX_REVIEW_REFUNDS) return false
-    this.refunds.set(lineage, (this.refunds.get(lineage) ?? 0) + 1)
-    this.applyRefund(lineage)
-    return true
-  }
-  // Rounds recorded under the previous identity format (sha256 of the canonical worktree alone,
-  // written before the scope included issue and subissue) are folded into the current key, so an
-  // upgrade cannot hand out a fresh budget.
-  adopt(from: string, to: string): void {
-    if (from === to) return
-    const moved = this.counts.get(from) ?? 0
-    if (moved > 0) this.counts.set(to, (this.counts.get(to) ?? 0) + moved)
-    this.counts.delete(from)
-    const refunded = Math.min(this.refunds.get(from) ?? 0, MAX_REVIEW_REFUNDS)
-    if (refunded > 0) {
-      this.refunds.set(to, Math.min((this.refunds.get(to) ?? 0) + refunded, MAX_REVIEW_REFUNDS))
-    }
-    this.refunds.delete(from)
-  }
-  private applyRefund(lineage: string): void {
-    const n = this.count(lineage)
-    if (n <= 1) this.counts.delete(lineage)
-    else this.counts.set(lineage, n - 1)
-  }
-  atCap(lineage: string): boolean {
-    return this.count(lineage) >= MAX_REVIEW_ROUNDS
-  }
-  static fromEntries(entries: Entry[]): ReviewRounds {
-    const rounds = new ReviewRounds()
-    for (const e of entries) {
-      if (e.customType !== REVIEW_ROUND && e.customType !== REVIEW_ROUND_REFUND) continue
-      const lineage = dataField(e, "lineage")
-      if (!lineage) continue
-      if (e.customType === REVIEW_ROUND) rounds.start(lineage)
-      // Replay applies the same rules as a live refund, so a session written before the cap
-      // existed still gets at most MAX_REVIEW_REFUNDS refunds per task.
-      else rounds.refund(lineage)
-    }
-    return rounds
-  }
-}
-
-type Entry = { customType?: string; data?: unknown }
-
-function dataField(entry: Entry, key: string): string | null {
-  const v = (entry.data as Record<string, unknown> | undefined)?.[key]
-  return typeof v === "string" ? v : null
-}
-
-export class ApprovalStore {
-  private counts = new Map<string, number>()
-  add(hash: string): void {
-    this.counts.set(hash, (this.counts.get(hash) ?? 0) + 1)
-  }
-  has(hash: string): boolean {
-    return (this.counts.get(hash) ?? 0) > 0
-  }
-  consume(hash: string): boolean {
-    const n = this.counts.get(hash) ?? 0
-    if (n <= 0) return false
-    if (n === 1) this.counts.delete(hash)
-    else this.counts.set(hash, n - 1)
-    return true
-  }
-  static fromEntries(entries: Entry[]): ApprovalStore {
-    const store = new ApprovalStore()
-    for (const e of entries) {
-      const h = dataField(e, "sha256")
-      if (!h) continue
-      if (e.customType === APPROVAL) store.add(h)
-      else if (e.customType === APPROVAL_USED) store.consume(h)
-    }
-    return store
-  }
-}
-
-export class WriterTasks {
-  private ids = new Set<string>()
-  add(id: string): void {
-    this.ids.add(id)
-  }
-  has(id: string): boolean {
-    return this.ids.has(id)
-  }
-  static fromEntries(entries: Entry[]): WriterTasks {
-    const tasks = new WriterTasks()
-    for (const e of entries) {
-      const id = e.customType === WRITER_TASK ? dataField(e, "taskId") : null
-      if (id) tasks.add(id)
-    }
-    return tasks
-  }
-}
-
-// Returns the rejection text, or null when the brief passes. Fail-closed.
-export function briefRejection(agent: string, brief: string, cwd: string): string | null {
-  if (!WRITER_AGENTS.has(agent)) return null
-  const guard = resolveBriefGuard()
-  const payload = JSON.stringify({ cwd, tool_input: { subagent_type: agent, prompt: brief } })
-  const result = spawnSync(guard, [], {
-    input: payload,
-    encoding: "utf8",
-    timeout: BRIEF_GUARD_TIMEOUT_MS,
-    // The Pi side owns the brief contract for every project, so the structure check is forced
-    // here instead of depending on a repository heading that made it silently inert.
-    env: { ...process.env, BRIEF_GUARD_FORCE_STRUCTURE: "1" },
-  })
-  if (result.error) return `brief-guard could not run: ${result.error.message}`
-  if (result.status === null) return `brief-guard could not run: terminated by ${result.signal ?? "unknown signal"}`
-  if (result.status === 2) return (result.stderr ?? "").trim() || "brief-guard rejected the brief."
-  return null
-}
-
-type SubagentInput = {
-  agent?: unknown
-  task?: unknown
-  context?: unknown
-  mode?: unknown
-  task_id?: unknown
-  workspace_root?: unknown
-  repository_root?: unknown
-}
-
 function text(value: unknown): string {
   return typeof value === "string" ? value : ""
 }
@@ -637,230 +202,46 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-const NOT_APPROVED =
-  'safety-guard: brief not approved. Run gentle-ai-brief-review with mode "task" and the brief between <<<BRIEF and BRIEF>>>, then launch the writer with that same brief: either wrap it in the same markers, since only metadata header lines (`mode: task`, `worktree:`, `issue:`, `subissue:`) and a `context` that repeats the brief never move the key, or pass the brief text alone with no `context`. Approvals are single-use.'
-const writerExtraBlocked = (extra: string[]) =>
-  `safety-guard: this text is not part of the approved brief, so no review approved it:\n${extra
-    .map((line) => `- ${line}`)
-    .join("\n")}\nMove it into the brief and review again, or drop it: an approval covers only the brief text between <<<BRIEF and BRIEF>>>, and only metadata header lines (\`mode: task\`, \`worktree: <absolute path>\`, \`issue: <id>\`, \`subissue: <id>\`) may stay outside the markers. A \`context\` passes only when it repeats text of the approved brief.`
-const WRITER_FOLLOWUP =
-  "safety-guard: new instructions to a writer task are blocked; launch a new reviewed brief instead."
-const REVIEW_ROUNDS_BLOCKED =
-  "safety-guard: this task already used three reviews of a worker brief. Fix every finding from the last review in one pass before relaunching; three reviews per declared task (worktree, issue and subissue) are the limit, and one errored review per task gives its round back."
-const HUMAN_APPROVED_DISPATCH =
-  "safety-guard: the human approved this exact brief. No review ran and no round was charged; launch the writer now with the identical brief text."
-const HUMAN_APPROVAL_UNCHANGED =
-  "safety-guard: this brief is the exact text a review already rejected. Fix the findings before asking for a human approval."
-const pendingFindingsBlocked = (findings: string[]) =>
-  `safety-guard: a human approval must list every finding the reviews of this task raised, and ${findings.length} are missing. Paste each one, verbatim, outside the brief markers:\n${findings
-    .slice(0, 10)
-    .map((f) => `- ${f}`)
-    .join("\n")}`
-const HUMAN_APPROVED_REPEAT =
-  "safety-guard: this exact brief text was already approved by the human, and that approval is single-use. A corrected brief is a new text and needs its own decision."
-const WORKTREE_REQUIRED =
-  "safety-guard: start the reviewer task with `worktree: <absolute path>` on its first line, optionally followed by `issue: <id>` and `subissue: <id>` (for example `worktree: /repo-feat issue: 42 subissue: 12`). That line is the round identity of the three-review cap, so it must not come from the brief, a finding or the context."
-
 export default function (
   pi: ExtensionAPI,
   publisher = isPublisherProcess(process.env, process.argv),
   child = process.env.GENTLE_PI_AGENTS_CHILD === "1",
 ) {
-  let approvals = new ApprovalStore()
-  let writerTasks = new WriterTasks()
-  let rounds = new ReviewRounds()
-  let humanApprovals = new HumanApprovals()
-  let pendingFindings = new PendingFindings()
-  const pendingReviews = new Map<string, { hash: string; lineage: string }>()
-
-  const rebuild = (ctx: unknown) => {
+  pi.on("tool_call", async (event) => {
+    if (!SHELL_TOOLS.has(event.toolName)) return
+    const command = text((event.input as { command?: unknown }).command)
     try {
-      const entries = ((ctx as { sessionManager: { getBranch(): Entry[] } }).sessionManager.getBranch() ?? []) as Entry[]
-      approvals = ApprovalStore.fromEntries(entries)
-      writerTasks = WriterTasks.fromEntries(entries)
-      rounds = ReviewRounds.fromEntries(entries)
-      humanApprovals = HumanApprovals.fromEntries(entries)
-      pendingFindings = PendingFindings.fromEntries(entries)
+      const label = destructiveMatch(command)
+      if (label) {
+        return {
+          block: true,
+          reason: `safety-guard: "${label}" is blocked. If the human explicitly authorized it, ask them to run it themselves.`,
+        }
+      }
     } catch (err) {
-      console.warn("[safety-guard] could not rebuild state from the session", err)
+      console.warn("[safety-guard] unexpected error; passing the call through", err)
     }
-  }
-  pi.on("session_start", async (_event, ctx) => rebuild(ctx))
-  pi.on("session_tree", async (_event, ctx) => rebuild(ctx))
-
-  pi.on("tool_call", async (event, ctx) => {
-    if (SHELL_TOOLS.has(event.toolName)) {
-      const command = text((event.input as { command?: unknown }).command)
+    if (!child) {
       try {
-        const label = destructiveMatch(command)
-        if (label) {
-          return {
-            block: true,
-            reason: `safety-guard: "${label}" is blocked. If the human explicitly authorized it, ask them to run it themselves.`,
-          }
-        }
-      } catch (err) {
-        console.warn("[safety-guard] unexpected error; passing the call through", err)
-      }
-      if (!child) {
-        try {
-          const label = heavyMatch(command)
-          if (label) return { block: true, reason: HEAVY_BLOCKED(label) }
-        } catch (err) {
-          return { block: true, reason: `safety-guard: internal error (${errMessage(err)}); command check blocked (fail-closed).` }
-        }
-      }
-      // Environment files hold secrets: blocked everywhere, publisher included.
-      try {
-        const label = envPathMatch(command)
-        if (label) return { block: true, reason: ENV_BLOCKED(label) }
+        const label = heavyMatch(command)
+        if (label) return { block: true, reason: HEAVY_BLOCKED(label) }
       } catch (err) {
         return { block: true, reason: `safety-guard: internal error (${errMessage(err)}); command check blocked (fail-closed).` }
       }
-      if (publisher) return
-      try {
-        const label = deliveryMatch(command)
-        if (label) return { block: true, reason: DELIVERY_BLOCKED(label) }
-      } catch (err) {
-        return { block: true, reason: `safety-guard: internal error (${errMessage(err)}); delivery check blocked (fail-closed).` }
-      }
-      return
     }
-
-    if (event.toolName === "subagent_run") {
-      try {
-        const input = event.input as SubagentInput
-        const agent = text(input.agent)
-        const task = text(input.task)
-
-        if (agent === REVIEWER) {
-          if (input.mode !== "task") {
-            return { block: true, reason: 'safety-guard: gentle-ai-brief-review must run with mode "task".' }
-          }
-          const marked = extractMarkedBrief(task)
-          if (marked === null) {
-            return {
-              block: true,
-              reason:
-                "safety-guard: put the exact brief inline in the task, between a line `<<<BRIEF` and a line `BRIEF>>>` (exactly one pair).",
-            }
-          }
-          if (/^VERDICT:/m.test(marked)) {
-            return { block: true, reason: "safety-guard: the brief text must not contain a line starting with `VERDICT:`." }
-          }
-          const cwd =
-            text(input.workspace_root) || text(input.repository_root) || text((ctx as { cwd?: unknown }).cwd) || process.cwd()
-          const rejection = briefRejection(writerAgentOfReviewTask(task), marked, cwd)
-          if (rejection) return { block: true, reason: rejection }
-          const scope = declaredReviewScope(task)
-          const lineage = roundIdentity(task)
-          if (!scope || !lineage) return { block: true, reason: WORKTREE_REQUIRED }
-          rounds.adopt(sha256(scope.worktree), lineage)
-          // A human decision settles this exact brief without a review: no round is charged, and it
-          // applies at any point of the review budget, as often as the human decides, on new text.
-          if (hasHumanApproval(task)) {
-            const hash = sha256(marked)
-            if (approvals.has(hash)) return { block: true, reason: HUMAN_APPROVED_DISPATCH }
-            const pending = pendingFindings.of(lineage)
-            const missing = missingFindings(task, pending.findings)
-            if (missing.length > 0) return { block: true, reason: pendingFindingsBlocked(missing) }
-            if (pending.hashes.includes(hash)) return { block: true, reason: HUMAN_APPROVAL_UNCHANGED }
-            if (!humanApprovals.use(hash)) return { block: true, reason: HUMAN_APPROVED_REPEAT }
-            approvals.add(hash)
-            pendingFindings.clear(lineage)
-            pi.appendEntry(REVIEW_FINDINGS, { lineage, sha256: hash, cleared: "1", at: new Date().toISOString() })
-            pi.appendEntry(HUMAN_APPROVAL_ENTRY, { sha256: hash, at: new Date().toISOString() })
-            pi.appendEntry(APPROVAL, { sha256: hash, at: new Date().toISOString(), source: "human" })
-            return { block: true, reason: HUMAN_APPROVED_DISPATCH }
-          }
-          if (rounds.atCap(lineage)) return { block: true, reason: REVIEW_ROUNDS_BLOCKED }
-          rounds.start(lineage)
-          pi.appendEntry(REVIEW_ROUND, { lineage, at: new Date().toISOString() })
-          pendingReviews.set(event.toolCallId, { hash: sha256(marked), lineage })
-          return
-        }
-
-        if (WRITER_AGENTS.has(agent) || GATED_AGENTS.has(agent)) {
-          const brief = briefOf(task, input.context)
-          const cwd =
-            text(input.workspace_root) || text(input.repository_root) || text((ctx as { cwd?: unknown }).cwd) || process.cwd()
-          if (WRITER_AGENTS.has(agent)) {
-            const rejection = briefRejection(agent, brief, cwd)
-            if (rejection) return { block: true, reason: rejection }
-          }
-          // The review read only the brief: text outside the markers, or a context that does not
-          // repeat the brief, never rides along with the approval.
-          const extra = writerExtraText(task, input.context)
-          if (extra.length > 0) return { block: true, reason: writerExtraBlocked(extra) }
-          // Small-fix skips the model review only; the instant guard still runs above.
-          if (isSmallFixExempt(agent, brief)) return
-          const hash = writerBriefKey(task, input.context)
-          if (!approvals.consume(hash)) return { block: true, reason: NOT_APPROVED }
-          pi.appendEntry(APPROVAL_USED, { sha256: hash })
-        }
-      } catch (err) {
-        return {
-          block: true,
-          reason: `safety-guard: internal error (${errMessage(err)}); writer dispatch blocked (fail-closed).`,
-        }
-      }
-      return
-    }
-
-    if (event.toolName === "subagent_continue" || event.toolName === "subagent_send_message") {
-      try {
-        const id = text((event.input as SubagentInput).task_id)
-        if (id && writerTasks.has(id)) return { block: true, reason: WRITER_FOLLOWUP }
-      } catch (err) {
-        return {
-          block: true,
-          reason: `safety-guard: internal error (${errMessage(err)}); follow-up blocked (fail-closed).`,
-        }
-      }
-    }
-  })
-
-  pi.on("tool_result", async (event) => {
-    if (event.toolName !== "subagent_run") return
+    // Environment files hold secrets: blocked everywhere, publisher included.
     try {
-      const input = event.input as SubagentInput
-      const agent = text(input.agent)
-      if (agent === REVIEWER) {
-        const pending = pendingReviews.get(event.toolCallId)
-        pendingReviews.delete(event.toolCallId)
-        if (!pending) return
-        if (event.isError) {
-          if (rounds.refund(pending.lineage)) {
-            pi.appendEntry(REVIEW_ROUND_REFUND, { lineage: pending.lineage, at: new Date().toISOString() })
-          }
-          return
-        }
-        const body = (event.content ?? [])
-          .map((c) => (c.type === "text" ? c.text : ""))
-          .join("\n")
-        const verdict = parseVerdict(body)
-        if (verdict === "FIX") {
-          const findings = parseFindings(body)
-          pendingFindings.add(pending.lineage, pending.hash, findings)
-          pi.appendEntry(REVIEW_FINDINGS, { lineage: pending.lineage, sha256: pending.hash, findings, at: new Date().toISOString() })
-        }
-        if (verdict === "APPROVE") {
-          approvals.add(pending.hash)
-          pi.appendEntry(APPROVAL, { sha256: pending.hash, at: new Date().toISOString() })
-        }
-        return
-      }
-      if (GATED_AGENTS.has(agent)) {
-        const details = (event as { details?: { gentleAgents?: { taskId?: unknown } } }).details
-        const body = (event.content ?? []).map((c) => (c.type === "text" ? c.text : "")).join("\n")
-        const taskId = typeof details?.gentleAgents?.taskId === "string" ? details.gentleAgents.taskId : taskIdFromText(body)
-        if (typeof taskId === "string" && taskId) {
-          writerTasks.add(taskId)
-          pi.appendEntry(WRITER_TASK, { taskId, agent })
-        }
-      }
+      const label = envPathMatch(command)
+      if (label) return { block: true, reason: ENV_BLOCKED(label) }
     } catch (err) {
-      console.warn("[safety-guard] tool_result handling failed", err)
+      return { block: true, reason: `safety-guard: internal error (${errMessage(err)}); command check blocked (fail-closed).` }
+    }
+    if (publisher) return
+    try {
+      const label = deliveryMatch(command)
+      if (label) return { block: true, reason: DELIVERY_BLOCKED(label) }
+    } catch (err) {
+      return { block: true, reason: `safety-guard: internal error (${errMessage(err)}); delivery check blocked (fail-closed).` }
     }
   })
 }
