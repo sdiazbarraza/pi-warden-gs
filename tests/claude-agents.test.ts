@@ -9,7 +9,6 @@ const AGENT_FILES = [
   "gentle-ai-runner.md",
   "gentle-ai-worker-infra.md",
   "gentle-ai-publisher.md",
-  "gentle-ai-brief-review.md",
   "gentle-ai-prompt-refine.md",
 ]
 

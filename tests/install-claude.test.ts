@@ -29,13 +29,12 @@ function setup(seed?: (claude: string) => void) {
   return { home, claude, out, rerun }
 }
 
-const HOOKS = ["safety-guard.mjs", "brief-approval.mjs", "reply-length.mjs", "rtk.mjs"]
+const HOOKS = ["safety-guard.mjs", "reply-length.mjs", "rtk.mjs"]
 
 const AGENTS = [
   "gentle-ai-runner.md",
   "gentle-ai-worker-infra.md",
   "gentle-ai-publisher.md",
-  "gentle-ai-brief-review.md",
   "gentle-ai-prompt-refine.md",
 ]
 
@@ -45,7 +44,6 @@ test("the Claude Code hooks, subagents and global prompt are installed", () => {
   for (const hook of HOOKS) {
     assert.ok(existsSync(join(claude, "hooks", hook)), `${hook} is missing`)
   }
-  assert.ok(existsSync(join(claude, "hooks", "lib", "approvals.mjs")))
   assert.ok(existsSync(join(claude, "hooks", "lib", "agent-context.mjs")))
   for (const agent of AGENTS) {
     assert.ok(existsSync(join(claude, "agents", agent)), `${agent} is missing`)
@@ -80,9 +78,7 @@ test("the hooks are registered in settings.json and foreign entries survive", ()
   for (const command of [
     "node ~/.claude/hooks/safety-guard.mjs",
     "node ~/.claude/hooks/rtk.mjs",
-    "node ~/.claude/hooks/brief-approval.mjs",
     "node ~/.claude/hooks/reply-length.mjs",
-    "~/.claude/hooks/brief-guard.sh",
   ]) {
     assert.ok(registered.includes(command), `${command} is not registered`)
   }
@@ -120,4 +116,88 @@ test("CLAUDE_WARDEN_MODEL overrides the model of every Claude subagent", () => {
   const out = rerun({ CLAUDE_WARDEN_MODEL: "opus" })
   assert.equal(out.status, 0, out.stderr)
   assert.match(readFileSync(join(claude, "agents", "gentle-ai-runner.md"), "utf8"), /^model: opus$/m)
+})
+
+test("installing 3.0.0 removes the retired brief-review assets and reports each one", () => {
+  const retiredClaude = [
+    join("hooks", "brief-guard.sh"),
+    join("hooks", "brief-approval.mjs"),
+    join("hooks", "lib", "approvals.mjs"),
+    join("agents", "gentle-ai-brief-review.md"),
+  ]
+  const { claude, out } = setup((claude) => {
+    mkdirSync(join(claude, "hooks", "lib"), { recursive: true })
+    mkdirSync(join(claude, "agents"), { recursive: true })
+    for (const rel of retiredClaude) writeFileSync(join(claude, rel), "previous install")
+    const piAgent = join(claude, "..", ".pi", "agent", "agents")
+    mkdirSync(piAgent, { recursive: true })
+    writeFileSync(join(piAgent, "gentle-ai-brief-review.md"), "previous install")
+    writeFileSync(
+      join(claude, "settings.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Agent",
+              hooks: [
+                { type: "command", command: "~/.claude/hooks/brief-guard.sh", timeout: 10 },
+                { type: "command", command: "my-own-hook", timeout: 5 },
+              ],
+            },
+          ],
+          PostToolUse: [
+            { matcher: "Agent", hooks: [{ type: "command", command: "node ~/.claude/hooks/brief-approval.mjs", timeout: 5 }] },
+          ],
+          Stop: [{ matcher: "", hooks: [{ type: "command", command: "my-stop-hook", timeout: 5 }] }],
+        },
+      }),
+    )
+  })
+
+  assert.equal(out.status, 0, out.stderr)
+  for (const rel of retiredClaude) {
+    assert.equal(existsSync(join(claude, rel)), false, `${rel} survived the migration`)
+    assert.match(out.stdout, new RegExp(`removed ${join(claude, rel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`))
+  }
+  assert.equal(existsSync(join(claude, "..", ".pi", "agent", "agents", "gentle-ai-brief-review.md")), false)
+
+  const settings = JSON.parse(readFileSync(join(claude, "settings.json"), "utf8"))
+  const commands = Object.values(settings.hooks as Record<string, { hooks: { command: string }[] }[]>)
+    .flat()
+    .flatMap((entry) => entry.hooks.map((h) => h.command))
+  assert.ok(commands.includes("my-own-hook"), "a foreign PreToolUse hook was dropped")
+  assert.ok(commands.includes("my-stop-hook"), "a foreign event was dropped")
+  assert.doesNotMatch(commands.join("\n"), /brief-guard|brief-approval/)
+})
+
+test("a fresh install reports the Claude settings file once", () => {
+  const { out } = setup()
+  assert.equal(out.status, 0, out.stderr)
+  const reported = out.stdout
+    .split("\n")
+    .filter((line) => /^(unchanged|updated|copied) /.test(line) && line.includes("settings.json"))
+  assert.equal(reported.length, 1, `settings.json reported ${reported.length} times`)
+})
+
+test("the migration drops an emptied event and keeps one backup of the original", () => {
+  const original = JSON.stringify({
+    hooks: {
+      PreToolUse: [{ matcher: "Agent", hooks: [{ type: "command", command: "~/.claude/hooks/brief-guard.sh", timeout: 10 }] }],
+      PostToolUse: [{ matcher: "Agent", hooks: [{ type: "command", command: "node ~/.claude/hooks/brief-approval.mjs", timeout: 5 }] }],
+    },
+  })
+  const { claude, out } = setup((claude) => {
+    mkdirSync(join(claude, "hooks", "lib"), { recursive: true })
+    writeFileSync(join(claude, "settings.json"), original)
+  })
+  assert.equal(out.status, 0, out.stderr)
+
+  const settings = JSON.parse(readFileSync(join(claude, "settings.json"), "utf8"))
+  assert.equal(settings.hooks.PostToolUse, undefined, "an event left empty by the migration must be dropped")
+
+  // The settings file is updated twice in this run: the registration and the migration. The first
+  // backup must still hold the user's original, and the second must not overwrite it.
+  const backups = readdirSync(claude).filter((name) => name.startsWith("settings.json.bak-")).sort()
+  assert.ok(backups.length >= 1, "the migration must keep a backup")
+  assert.equal(readFileSync(join(claude, backups[0]), "utf8"), original, "the first backup must hold the original file")
 })

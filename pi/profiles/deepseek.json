@@ -14,10 +14,6 @@
       "model": "deepseek/deepseek-v4-pro",
       "thinking": "high"
     },
-    "gentle-ai-brief-review": {
-      "model": "deepseek/deepseek-v4-pro",
-      "thinking": "medium"
-    },
     "gentle-ai-prompt-refine": {
       "model": "deepseek/deepseek-v4-pro",
       "thinking": "medium"

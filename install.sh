@@ -36,6 +36,21 @@ PLACEHOLDER_MODEL="provider/model"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+# 3.0.0 retires the brief-review gate. A previous install left two hooks, an approvals library and
+# a reviewer agent that point at nothing once the package stops shipping them, so they are removed
+# and each removal is reported; nothing is backed up, because the files have no further use.
+for retired in \
+  "$CLAUDE_HOME/hooks/brief-guard.sh" \
+  "$CLAUDE_HOME/hooks/brief-approval.mjs" \
+  "$CLAUDE_HOME/hooks/lib/approvals.mjs" \
+  "$CLAUDE_HOME/agents/gentle-ai-brief-review.md" \
+  "$PI_HOME/agents/gentle-ai-brief-review.md"; do
+  if [ -e "$retired" ]; then
+    rm -f "$retired"
+    echo "removed $retired (retired in 3.0.0: the brief-review gate)"
+  fi
+done
+
 # Move the legacy copies so the package extensions are not loaded twice.
 for name in safety-guard.ts rtk.ts minimax-review-binding.ts; do
   old="$PI_HOME/extensions/$name"
@@ -89,8 +104,6 @@ if [ -n "$MODEL_OVERRIDE" ]; then
 else
   echo "agent models: $PLACEHOLDER_MODEL in $PI_HOME/agents/*.md is a placeholder; edit it or rerun with PI_WARDEN_GS_MODEL=provider/model"
 fi
-place "$PKG_DIR/hooks/brief-guard.sh" "$CLAUDE_HOME/hooks/brief-guard.sh"
-chmod 755 "$CLAUDE_HOME/hooks/brief-guard.sh"
 
 # --- Claude Code: the same guards, the same global prompt, the same subagents.
 # Every file is deployed with a backup and the settings entries are added only when they are
@@ -178,7 +191,7 @@ done
 
 # Rewrites a JSON settings file with a jq filter, only when the result differs.
 update_json() {
-  local file="$1" filter="$2" tmp
+  local file="$1" filter="$2" tmp backup
   mkdir -p "$(dirname "$file")"
   [ -e "$file" ] || echo '{}' > "$file"
   tmp="$(mktemp "$file.XXXXXX")"
@@ -187,9 +200,16 @@ update_json() {
     rm -f "$tmp"
     echo "unchanged $file"
   else
-    cp -p "$file" "$file.bak-$STAMP"
+    # A file updated twice in one run must not lose the user's original to the second backup.
+    backup="$file.bak-$STAMP"
+    n=1
+    while [ -e "$backup" ]; do
+      n=$((n + 1))
+      backup="$file.bak-$STAMP-$n"
+    done
+    cp -p "$file" "$backup"
     mv "$tmp" "$file"
-    echo "updated $file (backup: $file.bak-$STAMP)"
+    echo "updated $file (backup: $backup)"
   fi
 }
 
@@ -213,6 +233,20 @@ update_json "$PI_HOME/models.json" "$(cat "$PKG_DIR/pi/models-minimax.jq")"
 
 if [ -f "$PKG_DIR/claude/claude-settings.jq" ]; then
   update_json "$CLAUDE_HOME/settings.json" "$(cat "$PKG_DIR/claude/claude-settings.jq")"
+fi
+
+# A registration that survived the removal points at a deleted script and would deny every Agent
+# call, so it is dropped here. Every other hook and matcher is left byte-identical, and a settings
+# file with no retired entry is not touched at all.
+if [ -f "$CLAUDE_HOME/settings.json" ] && grep -q 'brief-guard\.sh\|brief-approval\.mjs' "$CLAUDE_HOME/settings.json"; then
+  update_json "$CLAUDE_HOME/settings.json" '
+    if .hooks then
+      .hooks |= with_entries(
+        .value |= map(.hooks |= map(select(((.command // "") | test("brief-guard\\.sh|brief-approval\\.mjs")) | not)))
+        | .value |= map(select((.hooks | length) > 0))
+      )
+      | .hooks |= with_entries(select((.value | length) > 0))
+    else . end'
 fi
 
 "${REGISTER[@]}" "$PKG_DIR"

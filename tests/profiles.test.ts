@@ -29,28 +29,28 @@ test("plan-minimax-m3 routes every agent to MiniMax", () => {
 test("deepseek routes every gentle-ai and review agent to DeepSeek only", () => {
   const profile = JSON.parse(readFileSync(new URL("../pi/profiles/deepseek.json", import.meta.url), "utf8"))
   const agents = profile.agents as Record<string, { model: string }>
-  assert.equal(Object.keys(agents).length, 14)
+  assert.equal(Object.keys(agents).length, 13)
   for (const route of Object.values(agents)) assert.match(route.model, /^deepseek\/deepseek-(v4-pro|flash)$/)
 })
 
 test("gpt routes every gentle-ai and review agent to GPT only", () => {
   const profile = JSON.parse(readFileSync(new URL("../pi/profiles/gpt.json", import.meta.url), "utf8"))
   const agents = profile.agents as Record<string, { model: string }>
-  assert.equal(Object.keys(agents).length, 14)
+  assert.equal(Object.keys(agents).length, 13)
   for (const route of Object.values(agents)) assert.match(route.model, /^openai-codex\//)
 })
 
 test("opencode-go routes every agent to DeepSeek v4-pro or v4.1-flash through OpenCode Go", () => {
   const profile = JSON.parse(readFileSync(new URL("../pi/profiles/opencode-go.json", import.meta.url), "utf8"))
   const agents = profile.agents as Record<string, { model: string }>
-  assert.equal(Object.keys(agents).length, 14)
+  assert.equal(Object.keys(agents).length, 13)
   for (const route of Object.values(agents)) assert.match(route.model, /^opencode-go\/deepseek-(v4-pro|v4\.1-flash)$/)
 })
 
 test("go-minimax uses MiniMax for explore, runner, publisher and the four review lenses, DeepSeek via Go for the rest", () => {
   const profile = JSON.parse(readFileSync(new URL("../pi/profiles/go-minimax.json", import.meta.url), "utf8"))
   const agents = profile.agents as Record<string, { model: string }>
-  assert.equal(Object.keys(agents).length, 14)
+  assert.equal(Object.keys(agents).length, 13)
   for (const [agent, route] of Object.entries(agents)) {
     if (["gentle-ai-explore", "gentle-ai-runner", "gentle-ai-publisher", "review-risk", "review-resilience", "review-reliability", "review-readability"].includes(agent)) assert.equal(route.model, "minimax/MiniMax-M3", agent)
     else assert.match(route.model, /^opencode-go\/deepseek-(v4-pro|v4\.1-flash)$/, agent)

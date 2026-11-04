@@ -1,9 +1,12 @@
 # pi-warden-gs
 
 A [Pi](https://github.com/gentleman-programming/pi) package with the author's harness guards, gates
-and workarounds for Gentle AI workflows: it blocks destructive commands, requires a reviewed brief
-before any writer subagent starts, keeps the orchestrator's replies short, and repairs a
-`gentle_review` START whose arguments arrived mangled.
+and workarounds for Gentle AI workflows: it blocks destructive commands, keeps delivery and heavy
+work in the right subagent, protects environment files, keeps the orchestrator's replies short, and
+repairs a `gentle_review` START whose arguments arrived mangled.
+
+Version 3.0.0 retires the brief-review gate: a task is now specified by its GitHub issue, and the
+protocol that validates an issue lives in its own package, `pi-issue-spec-gs`.
 
 Opinionated by design: this is one author's working configuration, published as-is so it can be
 read, copied and adapted. Read the code before installing it — packages can execute code in your
@@ -15,12 +18,11 @@ session.
 ## Requirements
 
 - Pi (`pi` CLI). Most extensions assume [gentle-pi](https://www.npmjs.com/package/gentle-pi) and its
-  `gentle-ai-*` subagents; `safety-guard.ts` and `brief-guard.sh` are the only pieces that depend on
-  them.
+  `gentle-ai-*` subagents; `safety-guard.ts` is the only piece that depends on them.
 - Claude Code, for the Claude Code side of the package (see [Claude Code](#claude-code)). That side
-  needs Node >= 22 in `PATH` to run the hooks and `jq` for the brief guard; it does not need Pi or
+  needs Node >= 22 in `PATH` to run the hooks and `jq` for the installer; it does not need Pi or
   gentle-pi.
-- `bash`, `jq` and `git` for `hooks/brief-guard.sh` and `install.sh`.
+- `bash`, `jq` and `git` for `install.sh`.
 - Node >= 22 only to run the tests.
 - `install.sh` and `bin/pi-perfil` read the target home from `gentle-shell home`: `link` uses
   `~/.pi/agent` and `~/.pi/gentle-ai`, `isolated` uses `~/.gentle-shell/agent` and
@@ -61,9 +63,7 @@ cd pi-warden-gs
    from the package.
 2. Copies `bin/pi-perfil` to `~/bin/pi-perfil` and the routing profiles to
    `~/.pi/gentle-ai/profiles/`.
-3. Installs `hooks/brief-guard.sh` as the Claude Code `PreToolUse` hook in
-   `~/.claude/hooks/` and registers it in `~/.claude/settings.json`.
-4. Installs the Claude Code side: the four hooks in `~/.claude/hooks/`, the five subagents in
+3. Installs the Claude Code side: the three hooks in `~/.claude/hooks/`, the four subagents in
    `~/.claude/agents/`, the global prompt in `~/.claude/APPEND_SYSTEM.md` included from
    `~/.claude/CLAUDE.md`, and the hook registrations in `~/.claude/settings.json`.
 5. Moves previously loose `safety-guard.ts`, `rtk.ts` and `minimax-review-binding.ts` out of
@@ -93,15 +93,14 @@ new or still carries it. The installer never changes Pi's default (orchestrator)
 ### Option 3 — hooks and agents only
 
 Copy `pi/APPEND_SYSTEM.md` and `pi/agents/*.md` into your agent directory by hand and register
-`hooks/brief-guard.sh` in your Claude Code settings. Nothing else is required: the `extensions/`
-files are plain Pi extensions if you prefer to load them with `-e`.
+`claude/hooks/safety-guard.mjs` in your Claude Code settings. Nothing else is required: the
+`extensions/` files are plain Pi extensions if you prefer to load them with `-e`.
 
 ### Verify the installation
 
 ```bash
 pi list                                  # the package appears
-node --experimental-strip-types --test tests/*.test.ts    # 73 tests, all passing
-chmod 755 hooks/brief-guard.sh           # only if you copied it by hand
+node --experimental-strip-types --test tests/*.test.ts    # every test passes
 ```
 
 In an open Pi session, run `/reload` after installing or updating the package.
@@ -118,24 +117,16 @@ labels.
 | `extensions/safety-guard.ts` (`tool_call`) | `claude/hooks/safety-guard.mjs` (`PreToolUse` on `Bash` and `Agent`) |
 | `extensions/reply-length.ts` (`before_agent_start`) | `claude/hooks/reply-length.mjs` (`UserPromptSubmit`) |
 | `extensions/rtk.ts` (`tool_call`) | `claude/hooks/rtk.mjs` (`PreToolUse` on `Bash`) |
-| approvals in Pi session entries | approvals in `~/.claude/.warden/approvals.json` |
 | `pi/APPEND_SYSTEM.md` | `claude/APPEND_SYSTEM.md`, included from `~/.claude/CLAUDE.md` |
 | `pi/agents/*.md` | `claude/agents/*.md` → `~/.claude/agents/` |
-| `hooks/brief-guard.sh` | the same script, already shared |
 
 ### What the Claude Code hooks do
 
 | Hook | Event | What it does |
 | --- | --- | --- |
 | `safety-guard.mjs` | `PreToolUse` (`Bash`) | Blocks destructive commands, delivery commands outside the publisher, and heavy builds or container runs outside a subagent |
-| `safety-guard.mjs` | `PreToolUse` (`Agent`) | The reviewed-brief gate: a writer launch needs an approved brief and a brief that passes `brief-guard.sh` |
-| `brief-approval.mjs` | `PostToolUse` (`Agent`) | Registers the sha256 of a brief the reviewer approved |
 | `reply-length.mjs` | `UserPromptSubmit` | Adds the reply-length reminder, in the main session only |
 | `rtk.mjs` | `PreToolUse` (`Bash`) | Rewrites the command through `rtk rewrite` |
-
-Claude Code has no session-entry API for hooks, so the approvals live in a file:
-`~/.claude/.warden/approvals.json` (override the directory with `CLAUDE_WARDEN_STATE_DIR`). The
-approvals are scoped to the session that granted them, are single-use, and the write is atomic.
 
 ### How the Claude Code side detects a subagent
 
@@ -177,7 +168,7 @@ CLAUDE_WARDEN_MODEL=sonnet ./install.sh
 ### Verify the Claude Code installation
 
 ```bash
-ls ~/.claude/hooks/                       # safety-guard.mjs, brief-approval.mjs, reply-length.mjs, rtk.mjs
+ls ~/.claude/hooks/                       # safety-guard.mjs, reply-length.mjs, rtk.mjs
 ls ~/.claude/agents/gentle-ai-*.md        # the five subagents
 grep -c "pi-warden-gs:append-system" ~/.claude/CLAUDE.md
 jq '.hooks.PreToolUse' ~/.claude/settings.json
@@ -221,8 +212,7 @@ export default function (pi: ExtensionAPI) {
 
 | Extension | Hooks | What it does | Failure mode |
 | --- | --- | --- | --- |
-| `safety-guard.ts` | `tool_call` | Blocks destructive bash commands, blocks direct delivery commands outside `gentle-ai-publisher`, blocks heavy builds in the orchestrator, and gates writer dispatch on a reviewed brief | Fail-**closed** on writer dispatch (any guard error blocks), fail-open on the bash destructive check |
-| `brief-guard.sh` (hook) | Claude Code `PreToolUse`, and spawned by `safety-guard` | Checks the eight required brief sections, their order, the stop-and-report clause, size, TDD line, weasel words, preconditions, edit surfaces and hidden-failure commands: it validates brief structure only, and the execution-time guard owns the delivery and `.env` rules, which match a literal path in the command line | Fail-open on parsing, exit 2 on a malformed brief |
+| `safety-guard.ts` | `tool_call` | Blocks destructive bash commands, blocks direct delivery commands outside `gentle-ai-publisher`, blocks heavy builds in the orchestrator, and blocks a command that names an environment file | Fail-**closed** on the delivery, heavy-work and environment-file checks, fail-open on the bash destructive check |
 | `reply-length.ts` | `before_agent_start` | Adds one hidden reminder per user-started run of the main session: at most 5 lines of at most 25 words, outcome first, long content in a file | Cannot fail: it only appends a message |
 | `rtk.ts` | `tool_call` | Rewrites bash commands to use `rtk` for token savings | Leaves commands alone when it cannot rewrite them |
 
@@ -230,73 +220,41 @@ A `tool_call` handler runs before the tool and may mutate `event.input`; Pi perf
 afterwards. A handler that throws blocks the tool, so every mutating path here is wrapped: mutations
 are deliberate and exceptions are swallowed into a pass-through.
 
-### The brief gate, end to end
+### 3.0.0 retires the brief gate
 
-Writer subagents (`gentle-ai-worker`, `gentle-ai-worker-infra`) only start with an approved brief:
+Earlier versions required an approved brief before any writer subagent started: a reviewer agent
+(`gentle-ai-brief-review`), a structural script (`hooks/brief-guard.sh`), an approvals library and a
+three-round budget in both runtimes.
 
-1. The orchestrator runs `gentle-ai-brief-review` with `mode: "task"` and the exact brief inline,
-   between a line `<<<BRIEF` and a line `BRIEF>>>`.
-2. `safety-guard.ts` requires the reviewer to run in a foreground `task`, rejects a brief that
-   already contains a `VERDICT:` line, and runs `brief-guard.sh` on the marked brief before the
-   model review starts.
-3. On `VERDICT: APPROVE` the sha256 of the normalized brief (CRLF → LF, trimmed) becomes a session
-   entry, an approval.
-4. A reviewer launch declares its task on the FIRST line: `worktree: <absolute path>` plus
-   `issue: <id>` and `subissue: <id>` when they exist; safety-guard blocks a launch without it.
-   That declared scope, canonicalized, is the round identity: a task gets at most three model
-   reviews, the fourth launch is blocked, and a review that ends in an error gives its round back
-   once per task: an always-failing reviewer cannot retry for free. Once the budget is spent the
-   orchestrator shows the human every finding raised for that task, and only then asks for a decision. A brief whose findings are all
-   fixed can be approved by the human instead of reviewed again: relaunch the reviewer with
-   `<!-- review: human-approved -->` right after the scope line, and that exact brief becomes the
-   writer's approval without a review or a charged round, at any point of the budget. The launch must
-   list every finding the reviews of that task raised, verbatim and outside the brief markers, and it
-   cannot approve the exact text a review already rejected; each brief text is approved that way once.
-   Sibling subissues of one worktree each get their own budget. The brief, the context and the
-   previous findings never enter the key, so a corrected brief keeps the same count, and a
-   `worktree:` line quoted inside a brief cannot redirect it.
-5. Launching a writer consumes that approval for byte-identical brief text. Wrapping the brief in the
-   same `<<<BRIEF` / `BRIEF>>>` markers keeps header lines and `context` out of the key; only metadata
-   header lines are allowed outside the markers (`mode: task`, `worktree: <absolute path>`,
-   `issue: <id>`, `subissue: <id>`, or the combined `worktree: ... issue: ... subissue: ...`), so any
-   other text outside them is not part of the approved brief and blocks the launch. `context` passes
-   only when it repeats text of the approved brief. A bare launch is hashed whole, so it must not
-   carry `context`. Approvals are single-use: any edit needs a new review.
-6. Before the approval is consumed, `hooks/brief-guard.sh` checks the structure and the extra
-   mechanical rules (size, TDD line, weasel words, preconditions, edit surfaces and hidden-failure
-   commands). It validates brief structure only: the delivery and `.env` rules belong to the
-   execution-time guard, which sees the command that will run. The `.env` rule matches a literal
-   path in that command line: the quotes inside a token are removed before the name is compared
-   (`cat .e''nv` names `.env`), and a path assembled by shell expansion (`$FILE`, `$(...)`) is a
-   known limit the rule does not detect. Pi forces that check with
-   `BRIEF_GUARD_FORCE_STRUCTURE=1`, so it applies to every writer brief regardless of `AGENTS.md`
-   or of whether the working directory is a git repository. In Claude Code the same script runs
-   as a hook, and there it activates only in repositories whose `AGENTS.md` defines
-   `### Brief del subagente`. The reviewer still judges verbatim acceptance-criteria matching
-   against the issue and whether the plan is the right work.
-7. A brief whose first line is `<!-- review: skipped (small fix) -->` skips the model review and
-   still runs the instant `brief-guard.sh` checks.
-8. `subagent_continue` and `subagent_send_message` to a writer task are always blocked: new
-   instructions need a new reviewed brief.
+All of it is gone. A task is specified by its GitHub issue: the parent issue carries the specs and
+the task list, and each task is one subissue with its acceptance criteria as checkboxes. What the
+script used to check is now content the issue must carry, and
+[`pi-issue-spec-gs`](https://github.com/sdiazbarraza/pi-issue-spec-gs) ships the protocol, the issue
+templates and a linter you run by hand.
 
-Approvals and writer task ids are session entries, so they survive reload, resume and branch
-changes. In exchange, an entry keyed by the old package name (`pi-overrides.brief-approval`) does
-not match after the rename to `pi-warden-gs`: the guard fails closed and that brief has to be
-reviewed again.
+Installing 3.0.0 removes the retired files and their hook registrations from a previous install and
+reports each removal:
+
+```bash
+./install.sh    # prints "removed ... (retired in 3.0.0: the brief-review gate)" for every stale asset
+```
+
+What stays is the rest of the guard layer: the destructive-command blocker, the delivery gate, the
+environment-file rule, the heavy-work delegation and the reply-length reminder.
+
 
 ### What `install.sh` puts where
 
 | From | To | Notes |
 | --- | --- | --- |
 | `pi/APPEND_SYSTEM.md` | `<agent-dir>/APPEND_SYSTEM.md` | Persistent global override appended to Pi's system prompt |
-| `pi/agents/*.md` | `<agent-dir>/agents/` | `gentle-ai-runner`, `-worker-infra`, `-publisher`, `-brief-review`, `-prompt-refine`; `model:` ships as the placeholder `provider/model`, and a `model:` you edited is kept |
+| `pi/agents/*.md` | `<agent-dir>/agents/` | `gentle-ai-runner`, `-worker-infra`, `-publisher`, `-prompt-refine`; `model:` ships as the placeholder `provider/model`, and a `model:` you edited is kept |
 | `pi/profiles/*.json` | `~/.pi/gentle-ai/profiles/` | Model routing per agent |
 | `pi/models-minimax.jq` | — | Used only to add a missing model to `models.json` |
 | `bin/pi-perfil` | `~/bin/pi-perfil` | Profile switcher, needs `jq` |
-| `hooks/brief-guard.sh` | `~/.claude/hooks/brief-guard.sh` | Shared with Claude Code |
 | `claude/hooks/*.mjs` | `~/.claude/hooks/` | The Claude Code guards, registered in `~/.claude/settings.json` |
-| `claude/hooks/lib/*.mjs` | `~/.claude/hooks/lib/` | The approval store and the subagent detection |
-| `claude/agents/*.md` | `~/.claude/agents/` | The same five subagents, `model:` ships as `inherit`, and a `model:` you edited is kept |
+| `claude/hooks/lib/*.mjs` | `~/.claude/hooks/lib/` | The subagent detection |
+| `claude/agents/*.md` | `~/.claude/agents/` | The same four subagents, `model:` ships as `inherit`, and a `model:` you edited is kept |
 | `claude/APPEND_SYSTEM.md` | `~/.claude/APPEND_SYSTEM.md` | Included from `~/.claude/CLAUDE.md` |
 | `extensions/*.ts` | *(nobody)* | Loaded in place from this package |
 
@@ -307,7 +265,7 @@ replaced, and the script can run repeatedly.
 
 ### Extensions
 
-- `extensions/safety-guard.ts`: destructive-command blocker, brief approval gate and delivery gate.
+- `extensions/safety-guard.ts`: destructive-command blocker, delivery gate and environment-file rule.
   `git push` and `gh pr create|merge|edit` run only inside `gentle-ai-publisher` — a gentle-pi child
   whose definition carries `<!-- pi-warden-gs:agent=gentle-ai-publisher -->` — while the orchestrator
   and other agents are blocked. Builds, test runs and container runs (`dotnet-in-docker.sh`,
@@ -337,12 +295,10 @@ you review with that family, and drop it once the upstream defects land.
 
 ### Hooks, agents and configuration
 
-- `hooks/brief-guard.sh`: the structural brief check shared with Claude Code, described above.
 - `pi/APPEND_SYSTEM.md`: the global override — subagent roles, verification rules, prompt refinement,
-  brief review, memory, and the reply-length policy.
+  the issue-as-spec contract, memory, and the reply-length policy.
 - `pi/agents/*.md`: the subagent definitions used by these rules (`gentle-ai-runner`,
-  `gentle-ai-worker-infra`, `gentle-ai-publisher`, `gentle-ai-brief-review`,
-  `gentle-ai-prompt-refine`). Each ships `model: provider/model` as a placeholder that the installer
+  `gentle-ai-worker-infra`, `gentle-ai-publisher`, `gentle-ai-prompt-refine`). Each ships `model: provider/model` as a placeholder that the installer
   must replace, plus the `thinking:` level the author picked for that role.
 - `pi/profiles/*.json`: model-routing profiles for the gentle-ai and review agents.
   `deepseek`: DeepSeek only (v4-pro for writers, verify and reviewers; flash for runner and
@@ -373,23 +329,23 @@ you review with that family, and drop it once the upstream defects land.
 node --experimental-strip-types --test tests/*.test.ts
 ```
 
-All 73 pass on a clean machine. They cover the destructive-command matcher, the brief approval flow,
-the structure checker as a real process, the reply-length reminder, the profile switcher and the
-installer. Node's TypeScript stripping is experimental, so the flag is required on Node 22.
+They cover the destructive-command matcher, the delivery gate, the environment-file rule, the
+heavy-work delegation, the removal of the brief gate, the migration of a previous install, the
+reply-length reminder, the profile switcher and the installer. Node's TypeScript stripping is experimental, so the flag is required on Node 22.
 
 ## Uninstall
 
 ```bash
 pi remove git:github.com/sdiazbarraza/pi-warden-gs   # or the source you installed
 rm -f <agent-dir>/APPEND_SYSTEM.md <agent-dir>/agents/gentle-ai-*.md ~/bin/pi-perfil
-rm -f ~/.claude/hooks/brief-guard.sh ~/.claude/hooks/*.mjs
-rm -rf ~/.claude/hooks/lib ~/.claude/.warden
+rm -f ~/.claude/hooks/*.mjs
+rm -rf ~/.claude/hooks/lib
 rm -f ~/.claude/agents/gentle-ai-*.md ~/.claude/APPEND_SYSTEM.md
 ```
 
-Remove the `brief-guard.sh` entry from `~/.claude/settings.json` and the `pi-warden-gs:append-system`
-block from `~/.claude/CLAUDE.md`, and restore any `*.bak-<stamp>` or `extensions-backup-<stamp>/` files
-you want back.
+Remove the hook entries from `~/.claude/settings.json` and the `pi-warden-gs:append-system` block
+from `~/.claude/CLAUDE.md`, and restore any `*.bak-<stamp>` or `extensions-backup-<stamp>/` files you
+want back.
 
 ## Excluded
 

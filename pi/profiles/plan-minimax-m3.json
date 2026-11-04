@@ -14,10 +14,6 @@
       "model": "minimax/MiniMax-M3",
       "thinking": "high"
     },
-    "gentle-ai-brief-review": {
-      "model": "minimax/MiniMax-M3",
-      "thinking": "medium"
-    },
     "gentle-ai-prompt-refine": {
       "model": "minimax/MiniMax-M3",
       "thinking": "medium"

@@ -12,29 +12,13 @@ const REQUIRED_SECTIONS = [
   "Roles",
   "Verification",
   "Prompt refinement",
-  "Brief review",
+  "Issues as the spec",
   "Small diagnosed fixes",
   "Search and memory",
-  "Brief content",
   "Context hygiene",
   "Model and effort",
   "Review tool arguments",
 ]
-
-// The structural contract enforced by hooks/brief-guard.sh, in order.
-const BRIEF_SECTIONS = [
-  "Objective",
-  "Preconditions",
-  "Steps",
-  "Allowed edit surfaces",
-  "Verification",
-  "Acceptance criteria",
-  "Architecture constraints",
-  "Report",
-]
-
-const STOP_AND_REPORT =
-  "If a step fails for a reason this brief does not cover, stop and report it; never change the planned design on your own."
 
 const PI_ONLY_VOCABULARY = [
   "subagent_run",
@@ -66,24 +50,16 @@ test("the global prompt keeps every required section", () => {
   }
 })
 
-test("the global prompt keeps the load-bearing strings verbatim", () => {
+test("the global prompt replaces the brief review with the issue contract", () => {
   const text = read()
-  assert.ok(text.includes("<<<BRIEF"), "missing the <<<BRIEF marker")
-  assert.ok(text.includes("BRIEF>>>"), "missing the BRIEF>>> marker")
-  assert.ok(
-    text.includes("<!-- review: skipped (small fix) -->"),
-    "missing the small-fix skip marker",
-  )
-  assert.ok(text.includes("Strict TDD is active."), "missing the Strict TDD line")
-  assert.ok(text.includes(STOP_AND_REPORT), "missing the stop-and-report clause")
-})
-
-test("the global prompt keeps the eight brief sections in order", () => {
-  const text = read()
-  const pattern = BRIEF_SECTIONS.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(
-    "[^A-Za-z]+",
-  )
-  assert.match(text, new RegExp(pattern), "the eight brief sections must appear in order")
+  assert.ok(text.includes("### Issues as the spec"), "missing the issue-as-spec section")
+  assert.ok(text.includes("## Specs"), "missing the parent-issue Specs section")
+  assert.ok(text.includes("## Tasks"), "missing the parent-issue Tasks section")
+  assert.ok(text.includes("one subissue"), "the tasks must be subissues")
+  assert.ok(text.includes("acceptance criteria"), "missing the acceptance criteria")
+  assert.ok(text.includes("pi-issue-spec-gs"), "the prompt must name the protocol package")
+  assert.ok(!text.includes("<<<BRIEF"), "the retired brief markers survived")
+  assert.ok(!text.includes("gentle-ai-brief-review"), "the retired reviewer survived")
 })
 
 test("the global prompt does not restate the reply-length policy", () => {
