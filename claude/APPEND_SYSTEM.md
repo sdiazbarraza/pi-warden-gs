@@ -25,7 +25,7 @@ that installs them. Project rules belong in each project's `CLAUDE.md`.
   the orchestrator; if the subagent is unavailable, stop and tell the human.
 - In Claude Code: work that writes Dockerfiles, Compose files or environment
   configuration, or runs containers to verify them, goes to
-  `gentle-ai-worker-infra` (same brief format; it carries fixed Docker and
+  `gentle-ai-worker-infra` (same task format; it carries fixed Docker and
   environment safety rules).
 
 ### Verification
@@ -65,56 +65,19 @@ that installs them. Project rules belong in each project's `CLAUDE.md`.
   route in one line.
 - Save its output verbatim with `mem_save`, `topic_key`
   `refined-request/<feature-name>` (one per feature, overwritten per request),
-  and keep the observation ID for brief review.
+  and keep the observation ID for the issue that carries the task.
 
-### Brief review
+### Issues as the spec
 
-- Before launching `gentle-ai-worker` or `gentle-ai-worker-infra`, launch
-  `gentle-ai-brief-review` with the Agent tool as a foreground launch and
-  the exact brief inline between a line `<<<BRIEF` and a line `BRIEF>>>`,
-  plus the worktree, the issue number, the human's requested corrections
-  and, if any, the current `refined-request/<feature-name>` observation ID.
-  Never write the brief to a file.
-- `hooks/brief-guard.sh` (also spawned before `gentle-ai-brief-review` and
-  at writer launch) enforces, locally and offline: the eight headings in
-  order and non-empty; `## Steps` ends with the stop-and-report clause;
-  brief size under 3072 bytes; if `Strict TDD is active.` appears it is the
-  first non-empty `## Steps` line; `## Steps` has no whole words `preferred`,
-  `may`, or the phrase `if possible`; `## Preconditions` names the expected
-  branch, `HEAD`, and `git status --short`; `## Allowed edit surfaces` lines
-  are repository-relative paths or narrow globs (no bullets, `.`, absolute
-  paths, or unquoted spaces); `## Verification` has no `export VAR=$(` or
-  `| while read`. It validates brief structure only; the execution-time guard
-  owns the delivery and `.env` rules: the `.env` rule matches a literal path in
-  the command line, removing the quotes inside a token before the name is
-  compared (`cat .e''nv` names `.env`); a path assembled by shell expansion
-  (`$FILE`, `$(...)`) is a known limit it does not detect. Fail-open on parse.
-  The reviewer judges the rest: acceptance criteria copied verbatim, whether
-  checks can fail, and whether the plan is the right work. A small-fix brief
-  starting with `<!-- review: skipped (small fix) -->` skips the model review
-  and still runs these instant checks.
-- The text between the markers must be byte-identical to the later launch's
-  prompt (the brief, plus any context, joined by one blank line). safety-guard
-  hashes both and blocks any launch whose exact brief was not approved.
-  Approvals are single-use: any edit, or a second launch, needs a new review.
-- `VERDICT: FIX`: fix every finding from that review in one pass, with the
-  inputs those findings depend on, and relaunch once. Pass the previous
-  findings back to the reviewer verbatim, one per line, so it classifies each
-  one as `CLOSED`, `OPEN` or `NEW`. Stop and show the human the findings when a
-  `FIX` repeats a finding from an earlier review of the same brief or when the
-  third review still returns `FIX`; new minor findings are fixed without
-  asking. `VERDICT: APPROVE`:
-  launch the identical text without showing it unless the human asked to
-  see it; report the verdict in one line.
-- Never send new instructions to a running writer agent (the `SendMessage`
-  tool); safety-guard blocks it. Launch a new reviewed brief instead.
-- Brief review applies only to those two writer agents. Runner, publisher,
-  explore and verify briefs never go through it (runner briefs still get the
-  self-check above; safety-guard blocks destructive commands at run time); launch the publisher with plain `git`
-  and `gh` commands (for example `gh pr merge` per PR, in order, stopping at
-  the first failure), never with a wrapper script.
-- Review never replaces human authorization for commits, merges, pushes,
-  issue or PR edits, or architectural decisions.
+A task is specified by its GitHub issue, not by a brief. The parent issue carries `## Specs`
+(numbered `S#` that quote the human's exact words) and `## Tasks`, where each task is one subissue.
+The subissue carries the objective, its acceptance criteria as verifiable checkboxes, the allowed
+edit surfaces and the verification commands.
+Everything the retired brief review checked is an acceptance criterion now: the eight sections in
+order, the size, the strict-test-first line, the banned words, the preconditions, the narrow edit
+surfaces and the commands that cannot hide a failure.
+`pi-issue-spec-gs` ships the protocol, the issue templates and a linter you run by hand; nothing
+blocks a launch.
 
 ### Small diagnosed fixes
 
@@ -122,12 +85,11 @@ that installs them. Project rules belong in each project's `CLAUDE.md`.
   at most one file and about 20 lines, no new behavior, dependency or design
   decision.
 - Use one worker agent (`gentle-ai-worker-infra` if it needs containers),
-  launched with the Agent tool, with the exact change and its checks; skip
-  brief review and the separate reviewer
-  (the task's final `gentle-ai-verify` covers it) by starting the brief with
-  the line `<!-- review: skipped (small fix) -->`. Save to Engram and update
-  the task list once, after the fix. If the fix is not small, the worker
-  stops and reports; never expand it.
+  launched with the Agent tool, with the exact change and its checks; the
+  task's final `gentle-ai-verify` covers it, so nothing reviews anything
+  before the launch. Save to Engram and update the task list once, after the
+  fix. If the fix is not small, the worker stops and reports; never expand
+  it.
 
 ### Search and memory
 
@@ -140,48 +102,6 @@ that installs them. Project rules belong in each project's `CLAUDE.md`.
 - During delivery steps (fetch, merge, push, PR, merge of a PR), update
   Engram and the todo list once, when the delivery ends or blocks, not after
   each step.
-
-### Brief content
-
-- A worker brief carries these headings, in this order, each one non-empty:
-  `## Objective`, `## Preconditions`, `## Steps`,
-  `## Allowed edit surfaces`, `## Verification`, `## Acceptance criteria`,
-  `## Architecture constraints`, `## Report`.
-- Known final content (issue/PR body, file text): write it yourself to a temp
-  file outside the repository and give the exact command that applies it;
-  subagents never draft text or compose commands.
-- Resolve every design choice first: `## Steps` has no "preferred", "may" or
-  "if possible". If a choice depends on something unknown, explore or ask.
-- If the change breaks or replaces tests or behavior, `## Steps` says what to
-  do with each (keep, adapt or remove, with reason); subagents never remove a
-  test on their own.
-- A brief that changes behavior puts the literal line `Strict TDD is active.` at the top of `## Steps`, followed by a RED step that runs the
-  new tests before any implementation (exact command, expected non-zero
-  exit and the failing tests per rule), then the implementation and GREEN
-  steps. Writer definitions treat RED as optional unless that line is
-  present; abbreviations such as "RED before behavior" do not activate it.
-- End every worker brief's `## Steps` with: "If a step fails for a reason this brief does not cover, stop and report it; never change the planned design on your own."
-- Container/environment work also fixes runtime user and file ownership,
-  where generated files live (named volume or bind mount), and which ports
-  and resources may be created or removed.
-- `## Allowed edit surfaces`: only repository-relative paths or narrow
-  globs, one per line, no bullets or prose; restrictions go in `## Steps`.
-- Full-diff review: `git diff --stat`, then read each changed file in ranges
-  of at most 100 lines (`sed -n '1,100p' <file>`, ...), not the whole `git
-  diff` (tool output is compacted per file).
-- A delivery that merges into the default branch ends with step and command
-  surface `git -C <main checkout> pull --ff-only`, so the main checkout and
-  its CodeGraph index match.
-- Keep briefs lean: state each fact once (a precondition checked by a
-  command is not repeated in prose), copy only the acceptance criteria the
-  task verifies, and reuse documented recipes (component READMEs) instead of
-  writing new command payloads. Aim for under 3 KB per brief.
-- Add a defensive check only when it guards a named risk of this task.
-- Batch corrections to the same issue, PR or file into one delegation.
-- Inject only the skills the task uses (no commit/PR skills for subagents
-  that do not commit or open PRs).
-- In Claude Code: run any delivery that pushes as a foreground Agent launch
-  (the push guardrail asks the human; background dialogs are dismissed).
 
 ### Context hygiene
 

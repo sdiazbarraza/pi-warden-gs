@@ -14,10 +14,6 @@
       "model": "opencode-go/deepseek-v4-pro",
       "thinking": "high"
     },
-    "gentle-ai-brief-review": {
-      "model": "opencode-go/deepseek-v4.1-flash",
-      "thinking": "medium"
-    },
     "gentle-ai-prompt-refine": {
       "model": "opencode-go/deepseek-v4.1-flash",
       "thinking": "medium"

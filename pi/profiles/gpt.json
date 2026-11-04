@@ -14,10 +14,6 @@
       "model": "openai-codex/gpt-6.1-sol",
       "thinking": "high"
     },
-    "gentle-ai-brief-review": {
-      "model": "openai-codex/gpt-6.1-sol",
-      "thinking": "medium"
-    },
     "gentle-ai-prompt-refine": {
       "model": "openai-codex/gpt-6.1-sol",
       "thinking": "medium"

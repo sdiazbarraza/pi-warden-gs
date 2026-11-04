@@ -14,32 +14,17 @@
 // 4. Bash: a command that names an environment file (".env" or ".env.*", except the
 //    exact ".env.example") is blocked everywhere, publisher included: environment
 //    files hold secrets. Fail-closed.
-// 5. Agent: gentle-ai-brief-review must run in the foreground with the brief inline between
-//    a line `<<<BRIEF` and a line `BRIEF>>>` (exactly one pair), and the brief must not carry
-//    a `VERDICT:` line.
-// 6. Agent: gentle-ai-worker and gentle-ai-worker-infra need an approved brief — the brief
-//    must pass the structural contract of hooks/brief-guard.sh and the sha256 of the
-//    normalized brief must hold an unused approval for this session. Fail-closed.
-// 7. SendMessage: new instructions to a writer task are blocked.
 //
 // The matching logic is a port of the Pi extension, not a rewrite: the labels and the
 // patterns are identical, and tests/claude-differential.test.ts runs the same corpus through
 // both implementations.
 
-import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
-import { homedir } from "node:os"
-import { dirname, join } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { readFileSync } from "node:fs"
+import { pathToFileURL } from "node:url"
 
 import { agentTypeOf } from "./lib/agent-context.mjs"
-import { consume, normalizeBrief, sha256 } from "./lib/approvals.mjs"
 
-const BRIEF_GUARD_TIMEOUT_MS = 5_000
-const WRITER_AGENTS = new Set(["gentle-ai-worker", "gentle-ai-worker-infra"])
-const REVIEWER = "gentle-ai-brief-review"
 const PUBLISHER = "gentle-ai-publisher"
-const SKIP_MARKER = "<!-- review: skipped (small fix) -->"
 
 // [pattern, label] — a match blocks the command.
 const DESTRUCTIVE = [
@@ -206,83 +191,6 @@ export const deliveryBlocked = (label) =>
   `safety-guard: "${label}" runs only inside gentle-ai-publisher. Delegate the exact git/gh commands to gentle-ai-publisher (mode "task") with the human's authorization.`
 export const envBlocked = (label) =>
   `safety-guard: "${label}" is blocked. Environment files hold secrets and must not be read by an agent. If the human explicitly authorized it, ask them to run it themselves.`
-export const NOT_APPROVED =
-  'safety-guard: brief not approved. Run gentle-ai-brief-review with mode "task" and this exact text between <<<BRIEF and BRIEF>>>, then relaunch the identical text. Approvals are single-use.'
-export const WRITER_FOLLOWUP =
-  "safety-guard: new instructions to a writer task are blocked; launch a new reviewed brief instead."
-export const REVIEWER_MODE = 'safety-guard: gentle-ai-brief-review must run with mode "task".'
-export const MISSING_MARKERS =
-  "safety-guard: put the exact brief inline in the task, between a line `<<<BRIEF` and a line `BRIEF>>>` (exactly one pair)."
-export const VERDICT_IN_BRIEF = "safety-guard: the brief text must not contain a line starting with `VERDICT:`."
-
-// --- brief helpers ---------------------------------------------------------
-
-/** The normalized text between a line `<<<BRIEF` and a line `BRIEF>>>`; null unless exactly one pair. */
-export function extractMarkedBrief(task) {
-  const lines = String(task ?? "").replace(/\r\n/g, "\n").split("\n")
-  const starts = lines.flatMap((line, i) => (line === "<<<BRIEF" ? [i] : []))
-  const ends = lines.flatMap((line, i) => (line === "BRIEF>>>" ? [i] : []))
-  if (starts.length !== 1 || ends.length !== 1 || ends[0] <= starts[0]) return null
-  return normalizeBrief(lines.slice(starts[0] + 1, ends[0]).join("\n"))
-}
-
-/** The verdict a reviewer reported, or null. */
-export function parseVerdict(text) {
-  const match = /^VERDICT:\s*(APPROVE|FIX)\b/m.exec(String(text ?? ""))
-  return match ? match[1] : null
-}
-
-/** True when the brief opts out of the review with the small-fix marker. */
-export function isSmallFixExempt(agent, brief) {
-  if (!WRITER_AGENTS.has(agent)) return false
-  return normalizeBrief(brief).split("\n")[0] === SKIP_MARKER
-}
-
-/** Writer named outside <<<BRIEF / BRIEF>>> in a reviewer task; default gentle-ai-worker. */
-export function writerAgentOfReviewTask(task) {
-  const lines = String(task ?? "").replace(/\r\n/g, "\n").split("\n")
-  const start = lines.indexOf("<<<BRIEF")
-  const end = lines.indexOf("BRIEF>>>")
-  const outer =
-    start >= 0 && end > start ? [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n") : String(task ?? "")
-  if (/\bgentle-ai-worker-infra\b/.test(outer)) return "gentle-ai-worker-infra"
-  if (/\bgentle-ai-worker\b/.test(outer)) return "gentle-ai-worker"
-  return "gentle-ai-worker"
-}
-
-function resolveBriefGuard() {
-  const override = (process.env.CLAUDE_WARDEN_BRIEF_GUARD ?? "").trim()
-  if (override) return override
-  const shared = join(homedir(), ".claude", "hooks", "brief-guard.sh")
-  try {
-    const local = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "hooks", "brief-guard.sh")
-    return existsSync(shared) ? shared : local
-  } catch {
-    return shared
-  }
-}
-
-/**
- * The rejection of the structural contract, or null when the brief passes. Fail-closed:
- * a guard that cannot run rejects the brief.
- */
-export function briefRejection(agent, brief, cwd) {
-  if (!WRITER_AGENTS.has(agent)) return null
-  const guard = resolveBriefGuard()
-  const payload = JSON.stringify({ cwd, tool_input: { subagent_type: agent, prompt: brief } })
-  const result = spawnSync(guard, [], {
-    input: payload,
-    encoding: "utf8",
-    timeout: BRIEF_GUARD_TIMEOUT_MS,
-    // The brief contract belongs to the package for every project, so the structure check is
-    // forced here instead of depending on a repository heading that made it silently inert.
-    env: { ...process.env, BRIEF_GUARD_FORCE_STRUCTURE: "1" },
-  })
-  if (result.error) return `brief-guard could not run: ${result.error.message}`
-  if (result.status === null) return `brief-guard could not run: terminated by ${result.signal ?? "unknown signal"}`
-  if (result.status === 2) return (result.stderr ?? "").trim() || "brief-guard rejected the brief."
-  return null
-}
 
 // --- hook plumbing ---------------------------------------------------------
 
@@ -371,84 +279,6 @@ function handleBash(payload) {
   }
 }
 
-function handleAgent(payload) {
-  const input = payload?.tool_input ?? {}
-  const agent = text(input.subagent_type)
-
-  if (agent === REVIEWER) {
-    // The reviewer must run in the foreground: a background launch has no result to read.
-    if (input.run_in_background === true || input.run_in_background === "true") {
-      deny(REVIEWER_MODE)
-      return
-    }
-    const marked = extractMarkedBrief(text(input.prompt))
-    if (marked === null) {
-      deny(MISSING_MARKERS)
-      return
-    }
-    if (/^VERDICT:/m.test(marked)) {
-      deny(VERDICT_IN_BRIEF)
-      return
-    }
-    const cwd = text(payload?.cwd) || process.cwd()
-    const rejection = briefRejection(writerAgentOfReviewTask(text(input.prompt)), marked, cwd)
-    if (rejection) {
-      deny(rejection)
-      return
-    }
-    return
-  }
-
-  if (!WRITER_AGENTS.has(agent)) return
-
-  try {
-    const brief = normalizeBrief(text(input.prompt))
-    const cwd = text(payload?.cwd) || process.cwd()
-    const rejection = briefRejection(agent, brief, cwd)
-    if (rejection) {
-      deny(rejection)
-      return
-    }
-    // Small-fix skips the model review only; the instant guard still runs above.
-    if (isSmallFixExempt(agent, brief)) return
-
-    const hash = sha256(brief)
-    if (!consume(hash, text(payload?.session_id))) {
-      deny(NOT_APPROVED)
-      return
-    }
-  } catch (err) {
-    deny(`safety-guard: internal error (${errMessage(err)}); writer dispatch blocked (fail-closed).`)
-  }
-}
-
-/** The target of a SendMessage: a name, or an id that says nothing about the agent. */
-function sendMessageTarget(input) {
-  for (const field of ["to", "agent", "target", "name", "recipient"]) {
-    const value = input?.[field]
-    if (typeof value === "string" && value.trim()) return value
-  }
-  return ""
-}
-
-function isWriterTarget(target) {
-  const name = target.replace(/\s*\[[^\]]*\]\s*$/, "").trim()
-  return WRITER_AGENTS.has(name)
-}
-
-function handleSendMessage(payload) {
-  try {
-    const target = sendMessageTarget(payload?.tool_input ?? {})
-    // Fail-open: a target that cannot be determined is not blocked.
-    if (target && isWriterTarget(target)) {
-      deny(WRITER_FOLLOWUP)
-    }
-  } catch (err) {
-    // Fail-closed, like the Pi side: an internal error blocks the follow-up.
-    deny(`safety-guard: internal error (${errMessage(err)}); follow-up blocked (fail-closed).`)
-  }
-}
-
 export function main() {
   const payload = readPayload()
   if (!payload) return
@@ -456,14 +286,6 @@ export function main() {
   const toolName = text(payload.tool_name)
   if (toolName === "Bash") {
     handleBash(payload)
-    return
-  }
-  if (toolName === "Agent" || toolName === "Task") {
-    handleAgent(payload)
-    return
-  }
-  if (toolName === "SendMessage") {
-    handleSendMessage(payload)
   }
 }
 

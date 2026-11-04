@@ -18,7 +18,4 @@ def ensure($event; $matcher; $cmd; $timeout):
 .hooks = (.hooks // {})
 | ensure("PreToolUse";       "Bash";  "node ~/.claude/hooks/safety-guard.mjs";   10)
 | ensure("PreToolUse";       "Bash";  "node ~/.claude/hooks/rtk.mjs";            5)
-| ensure("PreToolUse";       "Agent"; "node ~/.claude/hooks/safety-guard.mjs";   10)
-| ensure("PreToolUse";       "Agent"; "~/.claude/hooks/brief-guard.sh";          10)
-| ensure("PostToolUse";      "Agent"; "node ~/.claude/hooks/brief-approval.mjs";  5)
 | ensure("UserPromptSubmit"; "";     "node ~/.claude/hooks/reply-length.mjs";    5)
